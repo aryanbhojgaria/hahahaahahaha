@@ -26,6 +26,7 @@ import yaml
 
 from doom_env import CONTRACT_VERSION
 from training.curriculum_plr import PLRBuffer
+from training.curriculum_stages import StageCurriculum
 from training.envs import VecDoomEnv
 from training.llm_coach import advise_curriculum
 from training.mapgen.tiers import MapGen
@@ -341,6 +342,29 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     fixed_wad = cfg.get("wad_path")
     wads_dir = output_dir / "wads"
     wads_dir.mkdir(parents=True, exist_ok=True)
+
+    # Staged easy->hard curriculum (single map -> easy -> medium -> hard -> random); replaces PLR sampling.
+    stager: Optional[StageCurriculum] = None
+    if str(cfg.get("curriculum", "plr")).lower() == "staged" and not fixed_wad:
+        lock = cfg.get("stage_lock")
+        stager = StageCurriculum(
+            stage_idx=int(cfg.get("stage_start", 0)),
+            stage_lock=None if lock is None else int(lock),
+            window=int(cfg.get("stage_window", 64)),
+            min_episodes=int(cfg.get("stage_min_episodes", 64)),
+            min_steps_per_stage=int(cfg.get("stage_min_steps", 100_000)),
+            max_steps_per_stage=int(cfg.get("stage_max_steps", 1_500_000)),
+            seed=seed,
+            state_path=output_dir / "stage_state.json",
+        )
+        stager.save()
+        print(f"[Stage] staged curriculum ON, starting at stage {stager.name}", flush=True)
+
+    def _next_level(update_idx: int):
+        if stager is not None:
+            return stager.sample()
+        return plr.sample_level(global_step=global_step, update_idx=update_idx)
+
     if fixed_wad:
         init_wads = [str(fixed_wad)] * num_envs
         env_levels = [None] * num_envs
@@ -348,7 +372,7 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
         init_wads = []
         env_levels = []
         for _ in range(num_envs):
-            lvl = plr.sample_level(global_step=global_step, update_idx=start_update)
+            lvl = _next_level(start_update)
             knobs = {**lvl["knobs"], "out_dir": str(wads_dir)}
             w_path, _ = MapGen.sample(
                 tier=lvl["tier"],
@@ -492,11 +516,13 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                         rolling_kills.append(k_val)
                         ep_returns[i] = 0.0
                         odom_states[i] = None
+                        if stager is not None:
+                            stager.report_episode(bool(completed_exits[-1]))
                         if not fixed_wad:
                             old_lvl = env_levels[i]
-                            if old_lvl is not None:
+                            if old_lvl is not None and stager is None:
                                 plr.update_score(old_lvl["level_id"], abs(ep_ret_val) + 0.5, upd)
-                            new_lvl = plr.sample_level(global_step=global_step, update_idx=upd)
+                            new_lvl = _next_level(upd)
                             knobs = {**new_lvl["knobs"], "out_dir": str(wads_dir)}
                             w_path, _ = MapGen.sample(
                                 tier=new_lvl["tier"],
@@ -669,7 +695,12 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
             roll_exit = float(np.mean(rolling_exits)) if rolling_exits else 0.0
             roll_kill = float(np.mean(rolling_kills)) if rolling_kills else 0.0
 
-            if use_llm_coach and not fixed_wad and (upd % coach_interval == 0):
+            if stager is not None:
+                stage_msg = stager.maybe_advance(global_step)
+                if stage_msg:
+                    print(stage_msg, flush=True)
+
+            if use_llm_coach and not fixed_wad and stager is None and (upd % coach_interval == 0):
                 telemetry = {
                     "global_step": global_step,
                     "update_idx": upd,
@@ -692,13 +723,25 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
             sps = steps_per_update / upd_dt
             if (upd - start_update) % log_interval == 0 or upd == start_update + total_updates:
                 elapsed_m = (time.perf_counter() - train_t0) / 60.0
+                stage_tag = f" stage={stager.name} stage_exit={stager.exit_rate()*100:.0f}%" if stager else ""
                 print(
                     f"[Upd {upd}/{start_update + total_updates} | step {global_step:,} | "
                     f"{sps:.0f} SPS | {elapsed_m:.1f}m] ret={roll_ret:+.2f} "
                     f"exit={roll_exit*100:.1f}% kills={roll_kill:.2f} "
-                    f"loss={last_loss:.4f} ent={cur_ent_coef:.4f}",
+                    f"loss={last_loss:.4f} ent={cur_ent_coef:.4f}{stage_tag}",
                     flush=True,
                 )
+                # Machine-readable metrics for analytics charts (committed to GitHub).
+                metrics_csv = output_dir / "metrics.csv"
+                write_header = not metrics_csv.exists()
+                with metrics_csv.open("a", encoding="utf-8") as mf:
+                    if write_header:
+                        mf.write("update,step,sps,mean_return,exit_rate,kills,loss,stage,stage_exit_rate\n")
+                    mf.write(
+                        f"{upd},{global_step},{sps:.1f},{roll_ret:.4f},{roll_exit:.4f},{roll_kill:.4f},"
+                        f"{last_loss:.5f},{stager.name if stager else 'plr'},"
+                        f"{stager.exit_rate() if stager else roll_exit:.4f}\n"
+                    )
 
             if wandb_run is not None:
                 wandb_run.log(
@@ -799,6 +842,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--latest-interval", type=int, default=None)
     parser.add_argument("--coach-interval", type=int, default=None)
     parser.add_argument("--use-llm-coach", action="store_true", default=False)
+    parser.add_argument("--curriculum", choices=["plr", "staged"], default=None,
+                        help="staged = single map -> easy -> medium -> hard -> random ladder")
+    parser.add_argument("--stage-start", type=int, default=None, help="first stage index (0..4)")
+    parser.add_argument("--stage-lock", type=int, default=None,
+                        help="train ONLY this stage (0 single_map,1 easy,2 medium,3 hard,4 random)")
+    parser.add_argument("--stage-max-steps", type=int, default=None, help="step budget per stage before forced advance")
     args = parser.parse_args(argv)
 
     cfg = _load_cfg_dict(args.config)
@@ -824,6 +873,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         cfg["coach_interval"] = int(args.coach_interval)
     if args.use_llm_coach:
         cfg["use_llm_coach"] = True
+    if args.curriculum is not None:
+        cfg["curriculum"] = args.curriculum
+    if args.stage_start is not None:
+        cfg["stage_start"] = int(args.stage_start)
+    if args.stage_lock is not None:
+        cfg["curriculum"] = "staged"
+        cfg["stage_lock"] = int(args.stage_lock)
+    if args.stage_max_steps is not None:
+        cfg["stage_max_steps"] = int(args.stage_max_steps)
 
     res = train(cfg)
     print(res)
