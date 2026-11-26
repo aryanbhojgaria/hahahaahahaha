@@ -11,7 +11,7 @@ This repository contains our Track 1 Deep RL submission for **DevForge × Scaler
 - **Ego-centric perception** — 64-ray depth/hit-type raycasts, entity vitals, yaw-delta odometry, and a coordinate-free 32×32 local occupancy grid (world XYZ never enters the network).
 - **HybridDoomNet (Actor-Critic)** — circular 1-D Conv ray encoder, vitals encoder, 256-d GRU temporal core, 4 × 8-d Objective Memory Slots, an **8-sector Value Compass** auxiliary head, and a 9-action MultiBinary policy head with legal action masking.
 - **Self-evolving training loop** — Recurrent PPO + GAE + BPTT with RND curiosity, grid novelty bonus, optional BC-KL warmstart, and **Prioritized Level Replay (PLR)** over a 4-tier procedural UDMF map generator.
-- **LLM Curriculum Coach** — queries CreoAI (`@cf/openai/gpt-oss-120b`) to adapt difficulty knobs online from live training metrics, with deterministic offline fallback when `CREO_API_KEY` is unset.
+- **LLM Curriculum Coach** — queries CreoAI to adapt PLR difficulty knobs online in `plr` mode, logs advisory telemetry in `staged` mode (without overriding stage progression), and falls back offline when `CREO_API_KEY` is unset.
 - **Strict evaluation envelope** — ≤ 2 GB VRAM, ≤ 8 GB RAM, 1 CPU thread (`torch.set_num_threads(1)`), and ≤ 40 ms/step verified via `validate.py`.
 
 ---
@@ -86,7 +86,9 @@ uv run python -m training.scorer.score_checkpoint \
 uv run python training/visualize_obs.py --checkpoint submission/weights/best_agent.pt --watch --random-maps
 ```
 
-> **Current Submitted Checkpoint (`881k` steps — Teacher→DAgger→BC-KL PPO):** **`3,122.37`** total score on 27 unseen held-out maps (`22.2%` zero-shot exit rate, Tier 1–4: `51.7 / 90.2 / 114.7 / 196.9`, `3.02 ms` mean `act()`, `13.03 ms` p99, `validate.py` **PASSED**).
+> **Current Submitted Checkpoint (`submission/weights/best_agent.pt`, strictly loaded):** **`2,076.24`** local proxy score on the 27-map validation suite (`training/scorer/eval_suite.json`; official organizer weights are hidden) — **`25.9%`** exit rate (`5/6` Tier 1 exits, `2/7` Tier 2 exits, `121` kills, `3` keys, `34` doors opened, `3` locks unlocked), **`2.73 ms`** mean `act()` (`13.10 ms` p99) on 1 CPU thread; `validate.py` **PASSED** (`two_rooms.wad:MAP01` exit in `72` steps, `p50 6.9 ms`, `p99 19.4 ms`); **`244/244`** pytest tests passing.
+>
+> **Disjoint Map Splits:** Training (`100_000–999_999`), Validation (`training/scorer/eval_suite.json`, `27` maps), and Final Test (`training/scorer/final_test_suite.json`, `18` maps — never used for training or selection).
 >
 > ![Training & Held-Out Analytics](docs/training_analytics.png)
 

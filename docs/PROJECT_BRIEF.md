@@ -14,12 +14,10 @@ Standard RL agents in FPS environments fail when evaluated on **unseen random ma
 3. **100% Rule-Compliant (`docs/RULES.md`):** Every action in `submission/agent.py` comes from trained PyTorch weights—zero `if/else` action trees, zero `A*`/BFS pathfinding at inference, and zero `atan2` aimbots. Only observation-legal masking (`USE` door-bounce cooldown, `ATTACK` empty-ammo mask) is applied.
 
 ### 2. Inference Budget (`1` CPU Thread)
-| Component | Mean CPU Latency |
-| :--- | :--- |
-| Preprocessing + 64-ray scan-match + `cv2.warpAffine` | `~0.9 ms` |
-| `HybridDoomNet` (Encoders + GRU + Slots + Heads) | `~4.6 ms` |
-| Action mask + deterministic seeded sampling | `~0.2 ms` |
-| **Total `DoomAgent.act()`** | **`~5.7 ms`** *(7× under `40 ms` cap)* |
+| Check / Benchmark | Measured Latency | Resource Envelope |
+| :--- | :--- | :--- |
+| `validate.py` (`two_rooms.wad:MAP01`, 72-step exit) | `p50 6.9 ms` / `p99 19.4 ms` | `3.8s` init, `1720 MB` RAM, `~247 MB` GPU |
+| 27-Map Validation Suite (`eval_results_baseline.json`) | **`2.73 ms` mean** / `13.10 ms` p99 | Strict 1-thread CPU, `14×` under `40 ms` cap |
 
 ---
 
@@ -32,17 +30,14 @@ Standard RL agents in FPS environments fail when evaluated on **unseen random ma
 4. **Recurrent PPO + RND Curiosity + Auxiliary Bearing Heads:** Truncated BPTT (`L=32`) with `done` hidden-state masking and RND intrinsic exploration.
 5. **Mandatory Vanilla Fine-Tune:** Final `2–4h` fine-tune with `scaffolding_alpha = 0.0` under strict vanilla `SKILL = 3` rules.
 
-### 4. Held-Out Benchmark & Ablation Summary
-Evaluated on `training/scorer/eval_suite.json` (24 disjoint procedural WADs + 3 `freedoom2.wad` maps) under 1-thread CPU enforcement:
+### 4. Validation Benchmark & Disjoint Map Splits (Local Proxy Score)
+Three strictly disjoint map splits (verified by seed & SHA-256): **Training** (`seeds 100_000–999_999`), **Validation** (`training/scorer/eval_suite.json`: 24 procedural WADs `1001–1024` + 3 `freedoom2.wad` maps `MAP01–03`), and **Final Test** (`training/scorer/final_test_suite.json`: 16 procedural WADs `50001–50016` + 2 `freedoom2.wad` maps `MAP04–05`, never used for training or selection). Scores below use our **local proxy formula** (official organizer weights are hidden). Note: in `plr` mode the LLM coach updates PLR knobs; in `staged` mode it logs advisory telemetry only.
 
-| Configuration / Checkpoint | Total Score | Exit Rate | Tier 1–4 Avg | Mean `act()` ms |
+| Configuration / Checkpoint (27-Map Validation Suite) | Local Proxy Score | Exit Rate | Tier 1–4 Avg | Mean `act()` ms |
 | :--- | :---: | :---: | :---: | :---: |
 | Random Baseline (`init_baseline`) | `0.00` | `0.0%` | `0.0` | `10.0 ms` |
-| `HybridDoomNet` + PLR + RND (`77.8k` steps) | `344.28` | `3.7%` | `19.0 / 6.2 / 11.7 / 15.0` | `3.28 ms` |
-| `HybridDoomNet` + PLR + RND + LLM Coach (`557k` steps) | `386.14` | `0.0%` | `7.7 / 16.9 / 6.6 / 25.1` | `2.37 ms` |
-| `HybridDoomNet` + PLR + RND + LLM Coach (`806.9k` steps) | `504.13` | `3.7%` | `19.2 / 14.0 / 18.3 / 23.3` | `2.22 ms` |
-| `HybridDoomNet` + Teacher → BC + Interactive DAgger (`R1`) | `2,406.13` | `14.8%` | `42.9 / 58.3 / 113.8 / 134.8` | `1.94 ms` |
-| **`HybridDoomNet` + DAgger → BC-KL Anchored PPO (`881k`, submitted)** | **`3,122.37`** | **`22.2%`** | **`51.7 / 90.2 / 114.7 / 196.9`** | **`3.02 ms`** |
+| `HybridDoomNet` + PLR + RND (`806.9k` steps) | `504.13` | `3.7%` | `19.2 / 14.0 / 18.3 / 23.3` | `2.22 ms` |
+| **`HybridDoomNet` + Teacher→DAgger→BC-KL PPO (submitted, `eval_results_baseline.json`)** | **`2,076.24`** | **`25.9%`** | **`69.3 / 70.4 / 24.5 / 142.3`** | **`2.73 ms`** |
 
 ### 5. Honest Limitations & Future Work
 - **Scan-Matching Drift:** Rapid multi-tic wall collisions can introduce minor `Δθ` drift in the `32×32` local grid, partially mitigated by exponential decay (`0.992`) and GRU hidden state.

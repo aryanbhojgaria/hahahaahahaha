@@ -27,15 +27,18 @@ class RewardWeights:
     damage_per_hp: float = -0.02
     death: float = -4.00
     door_reversal_bounce: float = -0.30
-    stuck_wall_scrape: float = -0.06
-    wasted_shot: float = -0.015
+    stuck_wall_scrape: float = -0.02
+    # Removed shooting penalty: doom_env.privileged_state() does NOT expose damage_dealt or hit_count,
+    # so penalizing ATTACK when kill_delta == 0 falsely penalizes damaging non-lethal shots.
+    wasted_shot: float = 0.0
     step_cost: float = -0.002
-    # Anti-loop / exploration shaping (training-only, relative displacement)
-    new_cell: float = 0.06
-    loop_penalty: float = -0.03
-    conflict_buttons: float = -0.01
-    backward_move: float = -0.004
-    forward_progress: float = 0.004
+    # Optional anti-loop / exploration shaping (0.0 by default to preserve Schema.md §2.4 sector-only rewards;
+    # when enabled, cell grid is spawn-relative so translation invariance is strictly preserved).
+    new_cell: float = 0.0
+    loop_penalty: float = 0.0
+    conflict_buttons: float = 0.0
+    backward_move: float = 0.0
+    forward_progress: float = 0.0
 
 
 def _point_in_segments(x: float, y: float, segs: np.ndarray) -> bool:
@@ -182,13 +185,13 @@ class RewardShaper:
             self.w_death = float(w.get("death", -4.00))
             self.w_door_bounce = float(w.get("door_bounce", -0.30))
             self.w_stuck = float(w.get("stuck", -0.02))
-            self.w_wasted_shot = float(w.get("wasted_shot", -0.015))
+            self.w_wasted_shot = float(w.get("wasted_shot", 0.0))
             self.w_step = float(w.get("step", -0.002))
-            self.w_cell = float(w.get("new_cell", 0.06))
-            self.w_loop = float(w.get("loop_penalty", -0.015))
-            self.w_conflict = float(w.get("conflict_buttons", -0.01))
-            self.w_back = float(w.get("backward_move", -0.004))
-            self.w_fwd = float(w.get("forward_progress", 0.004))
+            self.w_cell = float(w.get("new_cell", 0.0))
+            self.w_loop = float(w.get("loop_penalty", 0.0))
+            self.w_conflict = float(w.get("conflict_buttons", 0.0))
+            self.w_back = float(w.get("backward_move", 0.0))
+            self.w_fwd = float(w.get("forward_progress", 0.0))
 
         self._sectors: list[tuple[int, float, float, float, float, np.ndarray, float]] = []
         self.visited_sectors: set[int] = set()
@@ -202,6 +205,7 @@ class RewardShaper:
         self._env_prev_priv: Optional[dict[str, Any]] = None
         self.last_components: dict[str, float] = {}
         self._cells: set[tuple[int, int]] = set()
+        self._origin_xy: Optional[tuple[float, float]] = None
         self._pos_hist: list[tuple[float, float]] = []
 
     @property
@@ -246,6 +250,7 @@ class RewardShaper:
         self._env_prev_priv = None
         self.last_components = {}
         self._cells = set()
+        self._origin_xy = None
         self._pos_hist = []
 
         if env_obj is not None:
@@ -365,11 +370,12 @@ class RewardShaper:
                 self._prev_door_vel[s] = vel
 
         # 5. Combat, pickups & death
+        # Note: doom_env.privileged_state() only exposes `kills`, `items`, `damage_taken`, `health`, `dead`
+        # (no `damage_dealt` or `hit_count`), so non-lethal hits cannot be distinguished from misses.
+        # Therefore we reward kills and do NOT penalize non-lethal ATTACK steps.
         kill_delta = max(0, int(priv_now.get("kills", 0)) - int(priv_prev.get("kills", 0)))
         if kill_delta > 0:
             comp["kill"] = self.w_kill * float(kill_delta)
-        elif len(act) > 6 and int(act[6]) == 1 and not bool(priv_now.get("finished", False)):
-            comp["wasted_shot"] = self.w_wasted_shot
 
         item_delta = max(0, int(priv_now.get("items", 0)) - int(priv_prev.get("items", 0)))
         if item_delta > 0:
@@ -395,26 +401,31 @@ class RewardShaper:
         if self.stuck_steps > 8:
             comp["stuck"] = self.w_stuck
 
-        # 7. Anti-loop exploration shaping: reward new 80-unit cells, punish dithering in place
-        cell = (int(math.floor(x_now / 80.0)), int(math.floor(y_now / 80.0)))
-        if cell not in self._cells:
-            self._cells.add(cell)
-            if len(self._cells) > 1:
+        # 7. Optional spawn-relative anti-loop / exploration shaping (100% translation-invariant)
+        if self._origin_xy is None:
+            self._origin_xy = (float(priv_prev.get("x", x_now)), float(priv_prev.get("y", y_now)))
+            self._cells.add((0, 0))
+        if self.w_cell != 0.0:
+            ox0, oy0 = self._origin_xy
+            cell = (int(math.floor((x_now - ox0) / 80.0)), int(math.floor((y_now - oy0) / 80.0)))
+            if cell not in self._cells:
+                self._cells.add(cell)
                 comp["explore"] = self.w_cell
         self._pos_hist.append((x_now, y_now))
         if len(self._pos_hist) > 40:
             self._pos_hist.pop(0)
-        if len(self._pos_hist) == 40 and not bool(priv_now.get("finished", False)):
+        if self.w_loop != 0.0 and len(self._pos_hist) == 40 and not bool(priv_now.get("finished", False)):
             ox, oy = self._pos_hist[0]
-            if math.hypot(x_now - ox, y_now - oy) < 48.0:
+            if math.hypot(x_now - ox, y_now - oy) < 80.0:
                 comp["loop"] = self.w_loop
         if len(act) > 5:
-            n_conf = int(act[0] == 1 and act[1] == 1) + int(act[2] == 1 and act[3] == 1) + int(act[4] == 1 and act[5] == 1)
-            if n_conf:
-                comp["conflict"] = self.w_conflict * float(n_conf)
-            if int(act[1]) == 1 and int(act[0]) == 0:
+            if self.w_conflict != 0.0:
+                n_conf = int(act[0] == 1 and act[1] == 1) + int(act[2] == 1 and act[3] == 1) + int(act[4] == 1 and act[5] == 1)
+                if n_conf:
+                    comp["conflict"] = self.w_conflict * float(n_conf)
+            if self.w_back != 0.0 and int(act[1]) == 1 and int(act[0]) == 0:
                 comp["backward"] = self.w_back
-            if moving_fwd and int(act[1]) == 0 and disp >= 3.0:
+            if self.w_fwd != 0.0 and moving_fwd and int(act[1]) == 0 and disp >= 3.0 and self.stuck_steps == 0:
                 comp["forward"] = self.w_fwd
 
         self.last_components = comp

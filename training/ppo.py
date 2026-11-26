@@ -56,8 +56,18 @@ def compute_gae(
     next_value: torch.Tensor,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
+    truncated: Optional[torch.Tensor] = None,
+    trunc_values: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute Generalized Advantage Estimation over `(T, B)` tensors."""
+    """Compute Generalized Advantage Estimation over `(T, B)` tensors.
+
+    Handles continuing, real terminal (`done=1, truncated=0`), and time-limit truncated
+    (`done=1, truncated=1`) transitions distinctly:
+    - Continuing (`done=0`): bootstraps from `values[t+1]` (or `next_value` at `t=T-1`) and continues trace.
+    - Real terminal (`done=1, truncated=0`): NO bootstrap (`next_val = 0`), stops GAE trace.
+    - Time-limit truncation (`done=1, truncated=1`): bootstraps from `trunc_values[t]` (`V(final_obs)`),
+      while still stopping the GAE trace across the episode boundary.
+    """
     t_steps = rewards.shape[0]
     advantages = torch.zeros_like(rewards, dtype=torch.float32)
     gae = torch.zeros_like(next_value, dtype=torch.float32)
@@ -65,7 +75,12 @@ def compute_gae(
     for t in reversed(range(t_steps)):
         next_val = next_value if t == t_steps - 1 else values[t + 1]
         nonterminal = 1.0 - dones[t].float()
-        delta = rewards[t].float() + float(gamma) * next_val.float() * nonterminal - values[t].float()
+        if truncated is not None and trunc_values is not None:
+            trunc_f = truncated[t].float()
+            bootstrap_val = next_val.float() * nonterminal + trunc_values[t].float() * trunc_f
+        else:
+            bootstrap_val = next_val.float() * nonterminal
+        delta = rewards[t].float() + float(gamma) * bootstrap_val - values[t].float()
         gae = delta + float(gamma) * float(gae_lambda) * nonterminal * gae
         advantages[t] = gae
 
@@ -169,12 +184,13 @@ def save_checkpoint(
     update_idx: int = 0,
     scorer_summary: Optional[dict[str, Any]] = None,
     obs_norm_stats: Optional[dict[str, Any]] = None,
+    training_state: Optional[dict[str, Any]] = None,
 ) -> Path:
-    """Save a Schema.md §4 compliant `.pt` checkpoint atomically."""
+    """Save a Schema.md §4 compliant `.pt` checkpoint atomically with optional full training_state."""
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = out_path.with_suffix(f".pt.tmp.{os.getpid()}")
-    payload = {
+    payload: dict[str, Any] = {
         "contract_version": str(CONTRACT_VERSION),
         "git_sha": _current_git_sha(),
         "global_step": int(global_step),
@@ -186,6 +202,8 @@ def save_checkpoint(
             scorer_summary or {"total_score": 0.0, "mean_act_ms": 0.0, "p99_act_ms": 0.0}
         ),
     }
+    if training_state is not None:
+        payload["training_state"] = training_state
     torch.save(payload, tmp_path)
     os.replace(tmp_path, out_path)
     return out_path
@@ -266,14 +284,18 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     compass_coef = float(cfg.get("compass_coef", 0.15))
     bc_kl_beta_init = float(cfg.get("bc_kl_beta_init", 0.0))
     bc_kl_decay_steps = max(1, int(cfg.get("bc_kl_decay_steps", 4_000_000)))
-    rgb_dropout_p = float(cfg.get("rgb_dropout_p", 0.25))
+    # RGB dropout defaults to 0.0 in PPO so rollout old_log_prob and update new_log_prob match identically.
+    rgb_dropout_p = float(cfg.get("rgb_dropout_p", 0.0))
     steps_per_update = num_envs * rollout_steps
+    # max_steps semantics: additional environment steps to run in this training invocation.
     if cfg.get("max_steps") is not None:
         total_updates = max(1, int(np.ceil(int(cfg["max_steps"]) / float(steps_per_update))))
     else:
         total_updates = int(cfg.get("total_updates", 10))
     save_interval = max(1, int(cfg.get("save_interval", max(1, min(25, total_updates)))))
     latest_interval = max(1, int(cfg.get("latest_interval", 2)))
+    eval_interval = max(0, int(cfg.get("eval_interval", 0)))
+    val_suite_path = cfg.get("val_suite", "training/scorer/eval_suite.json")
     log_interval = max(1, int(cfg.get("log_interval", 1)))
     use_llm_coach = bool(cfg.get("use_llm_coach", False))
     coach_interval = max(1, int(cfg.get("coach_interval", 25)))
@@ -284,6 +306,11 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     best_out_raw = cfg.get("best_out")
     best_out_path = Path(best_out_raw) if best_out_raw else None
+    if best_out_path is not None and "submission" in best_out_path.parts and "weights" in best_out_path.parts:
+        raise ValueError(
+            f"Refusing direct training write to submission weights ('{best_out_path}'). "
+            "Promotion to submission/weights/ must be a deliberate separate step."
+        )
 
     model_cfg = dict(
         cfg.get(
@@ -301,20 +328,21 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     model = HybridDoomNet(model_cfg).to(device)
     global_step = 0
     start_update = 0
+    resume_ckpt: Optional[dict[str, Any]] = None
 
     resume_path = cfg.get("resume_checkpoint")
     if resume_path:
-        ckpt = load_checkpoint(resume_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        global_step = int(ckpt.get("global_step", 0))
-        start_update = int(ckpt.get("update_idx", 0))
+        resume_ckpt = load_checkpoint(resume_path, map_location=device)
+        model.load_state_dict(resume_ckpt["model_state_dict"], strict=True)
+        global_step = int(resume_ckpt.get("global_step", 0))
+        start_update = int(resume_ckpt.get("update_idx", 0))
 
     bc_anchor: Optional[HybridDoomNet] = None
     bc_anchor_path = cfg.get("bc_anchor_checkpoint")
     if bc_anchor_path and bc_kl_beta_init > 0.0:
         bc_ckpt = load_checkpoint(bc_anchor_path, map_location=device)
         bc_anchor = HybridDoomNet(bc_ckpt.get("model_config", model_cfg)).to(device)
-        bc_anchor.load_state_dict(bc_ckpt["model_state_dict"])
+        bc_anchor.load_state_dict(bc_ckpt["model_state_dict"], strict=True)
         bc_anchor.eval()
         for p in bc_anchor.parameters():
             p.requires_grad = False
@@ -364,8 +392,94 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
             seed=seed,
             state_path=output_dir / "stage_state.json",
         )
+
+    # Restore full training_state when resuming; warn explicitly on any missing legacy fields.
+    best_train_return = -float("inf")
+    best_val_score = -float("inf")
+    schedule_total_updates = max(1, start_update + total_updates)
+    rolling_returns: deque[float] = deque(maxlen=100)
+    rolling_exits: deque[float] = deque(maxlen=100)
+    rolling_kills: deque[float] = deque(maxlen=100)
+
+    if resume_ckpt is not None:
+        tstate = resume_ckpt.get("training_state")
+        missing_fields: list[str] = []
+        if not isinstance(tstate, dict):
+            missing_fields.extend(
+                ["optimizer", "rnd", "curriculum_or_plr", "rng_states", "best_val_score", "schedule_progress"]
+            )
+        else:
+            if "optimizer_state_dict" in tstate:
+                optimizer.load_state_dict(tstate["optimizer_state_dict"])
+            else:
+                missing_fields.append("optimizer")
+
+            if "rnd_state_dict" in tstate:
+                rnd.load_full_state_dict(tstate["rnd_state_dict"])
+            else:
+                missing_fields.append("rnd")
+
+            if stager is not None:
+                if "stager_state_dict" in tstate and tstate["stager_state_dict"] is not None:
+                    stager.load_state_dict(tstate["stager_state_dict"])
+                else:
+                    missing_fields.append("staged_curriculum")
+            else:
+                if "plr_state_dict" in tstate and tstate["plr_state_dict"] is not None:
+                    plr.load_state_dict(tstate["plr_state_dict"])
+                else:
+                    missing_fields.append("plr_buffer")
+
+            if "rng_states" in tstate and isinstance(tstate["rng_states"], dict):
+                rs = tstate["rng_states"]
+                if rs.get("torch") is not None:
+                    torch.set_rng_state(rs["torch"].cpu())
+                if rs.get("torch_cuda") is not None and torch.cuda.is_available():
+                    try:
+                        torch.cuda.set_rng_state_all(rs["torch_cuda"])
+                    except Exception:
+                        pass
+                if rs.get("numpy") is not None:
+                    np_rng.bit_generator.state = rs["numpy"]
+            else:
+                missing_fields.append("rng_states")
+
+            if "best_val_score" in tstate and tstate["best_val_score"] is not None:
+                best_val_score = float(tstate["best_val_score"])
+            else:
+                missing_fields.append("best_val_score")
+
+            if "best_train_return" in tstate and tstate["best_train_return"] is not None:
+                best_train_return = float(tstate["best_train_return"])
+
+            if "schedule_total_updates" in tstate and tstate["schedule_total_updates"] is not None:
+                schedule_total_updates = max(int(tstate["schedule_total_updates"]), start_update + total_updates)
+            else:
+                missing_fields.append("schedule_progress")
+
+            for val in tstate.get("rolling_returns", []):
+                rolling_returns.append(float(val))
+            for val in tstate.get("rolling_exits", []):
+                rolling_exits.append(float(val))
+            for val in tstate.get("rolling_kills", []):
+                rolling_kills.append(float(val))
+
+        if missing_fields:
+            print(
+                f"[Resume WARNING] Checkpoint '{resume_path}' is missing full training_state fields; "
+                f"resetting: {missing_fields}. Simulator episodes & recurrent state always restart on resume.",
+                flush=True,
+            )
+        else:
+            print(
+                f"[Resume] Restored full training_state @ step={global_step:,}, upd={start_update}, "
+                f"best_val={best_val_score:.2f}. (Simulator episodes & recurrent state reset to match.)",
+                flush=True,
+            )
+
+    if stager is not None:
         stager.save()
-        print(f"[Stage] staged curriculum ON, starting at stage {stager.name}", flush=True)
+        print(f"[Stage] staged curriculum ON, active stage {stager.name}", flush=True)
 
     def _next_level(update_idx: int):
         if stager is not None:
@@ -412,19 +526,33 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
 
     last_loss = 0.0
     last_mean_return = 0.0
-    best_mean_return = -float("inf")
-    if resume_path and isinstance(ckpt.get("scorer_summary"), dict):
-        prev_best = ckpt["scorer_summary"].get("total_score")
-        if prev_best is not None and float(prev_best) != 0.0:
-            best_mean_return = float(prev_best)
+    last_val_score: Optional[float] = None
     last_ckpt_path: Optional[Path] = None
     best_ckpt_path: Optional[Path] = None
-    rolling_returns: deque[float] = deque(maxlen=100)
-    rolling_exits: deque[float] = deque(maxlen=100)
-    rolling_kills: deque[float] = deque(maxlen=100)
     train_t0 = time.perf_counter()
 
+    def _capture_training_state(cur_upd: int) -> dict[str, Any]:
+        return {
+            "optimizer_state_dict": optimizer.state_dict(),
+            "rnd_state_dict": rnd.full_state_dict(),
+            "plr_state_dict": plr.state_dict() if stager is None else None,
+            "stager_state_dict": stager.state_dict() if stager is not None else None,
+            "rng_states": {
+                "torch": torch.get_rng_state(),
+                "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "numpy": np_rng.bit_generator.state,
+            },
+            "best_val_score": None if best_val_score == -float("inf") else float(best_val_score),
+            "best_train_return": None if best_train_return == -float("inf") else float(best_train_return),
+            "schedule_total_updates": int(schedule_total_updates),
+            "schedule_progress": min(1.0, float(cur_upd) / float(max(1, schedule_total_updates))),
+            "rolling_returns": list(rolling_returns),
+            "rolling_exits": list(rolling_exits),
+            "rolling_kills": list(rolling_kills),
+        }
+
     try:
+        # Simulator episodes always restart on fresh start or resume; reset recurrent & odometry state to match.
         obs_list, info_list = venv.reset()
         odom_states: list[Optional[OdomGridState]] = [None] * num_envs
         prev_privs = [inf.get("privileged_state") for inf in info_list]
@@ -442,6 +570,9 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
             buf_values = torch.zeros((rollout_steps, num_envs), dtype=torch.float32)
             buf_rewards = torch.zeros((rollout_steps, num_envs), dtype=torch.float32)
             buf_dones = torch.zeros((rollout_steps, num_envs), dtype=torch.float32)
+            buf_truncated = torch.zeros((rollout_steps, num_envs), dtype=torch.float32)
+            buf_trunc_values = torch.zeros((rollout_steps, num_envs), dtype=torch.float32)
+            buf_aux_valid = torch.ones((rollout_steps, num_envs), dtype=torch.float32)
             buf_next_rays = torch.zeros((rollout_steps, num_envs, 64), dtype=torch.float32)
             buf_compass_tgt = torch.zeros((rollout_steps, num_envs, 8), dtype=torch.float32)
 
@@ -501,17 +632,53 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
 
                 next_obs, extr_rew, term, trunc, next_info = venv.step(actions_np)
                 done_np = np.logical_or(term, trunc)
+                boundary_np = np.array(done_np, dtype=bool)
 
                 for i in range(num_envs):
-                    buf_next_rays[step, i] = torch.as_tensor(next_obs[i]["rays"]["distance"], dtype=torch.float32)
+                    restarted = bool(next_info[i].get("worker_restarted", False))
+                    recycled = bool(next_info[i].get("worker_recycled", False))
+                    if restarted or recycled:
+                        boundary_np[i] = True
+
+                    # Auxiliary next_rays must NEVER come from the next episode's reset observation
+                    if boundary_np[i]:
+                        final_obs = next_info[i].get("final_observation")
+                        if final_obs is not None:
+                            buf_next_rays[step, i] = torch.as_tensor(final_obs["rays"]["distance"], dtype=torch.float32)
+                        else:
+                            buf_aux_valid[step, i] = 0.0
+                    else:
+                        buf_next_rays[step, i] = torch.as_tensor(next_obs[i]["rays"]["distance"], dtype=torch.float32)
+
+                    # On time-limit truncation (not real terminal death/exit), bootstrap V(final_obs)
+                    # using the exact recurrent state & odometry state BEFORE episode reset.
+                    if bool(trunc[i]) and not bool(term[i]):
+                        final_obs = next_info[i].get("final_observation")
+                        if final_obs is not None:
+                            with torch.no_grad():
+                                fin_inp, _ = preprocess(
+                                    final_obs,
+                                    odom_states[i].copy() if odom_states[i] is not None else None,
+                                    device=device,
+                                    use_grid=bool(model_cfg.get("use_grid", True)),
+                                )
+                                fin_rec = RecurrentState(
+                                    gru_h=next_rec.gru_h[:, i : i + 1, :].detach(),
+                                    obj_slots=next_rec.obj_slots[i : i + 1].detach(),
+                                )
+                                _, fin_v, _, _ = model(fin_inp, fin_rec, return_aux=False)
+                                buf_truncated[step, i] = 1.0
+                                buf_trunc_values[step, i] = fin_v.squeeze().cpu()
+
                     p_prev = prev_privs[i]
                     p_now = next_info[i].get("terminal_privileged_state") or next_info[i].get("privileged_state")
-                    if isinstance(p_prev, dict) and isinstance(p_now, dict):
+                    if not restarted and isinstance(p_prev, dict) and isinstance(p_now, dict):
                         comps = next_info[i].get("reward_components", extr_rew[i])
                         buf_compass_tgt[step, i] = torch.from_numpy(
                             attribute_sector_rewards(p_prev, p_now, comps)
                         )
                     ep_returns[i] += float(extr_rew[i])
+
                     if done_np[i]:
                         ep_ret_val = float(ep_returns[i])
                         completed_returns.append(ep_ret_val)
@@ -543,6 +710,10 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                             )
                             next_obs[i], next_info[i] = venv.reset_with_wad(i, w_path, "MAP01", seed=new_lvl["seed"])
                             env_levels[i] = new_lvl
+                    elif restarted or recycled:
+                        # Worker crashed/recycled mid-episode: reset trackers cleanly
+                        ep_returns[i] = 0.0
+                        odom_states[i] = None
 
                     prev_privs[i] = next_info[i].get("privileged_state")
 
@@ -551,7 +722,7 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     + rnd_coef * intr_rnd.cpu()
                     + grid_novelty_coef * intr_grid.cpu()
                 )
-                done_t = torch.as_tensor(done_np, dtype=torch.float32)
+                done_t = torch.as_tensor(boundary_np, dtype=torch.float32)
 
                 buf_actions[step] = torch.from_numpy(actions_np.astype(np.float32))
                 buf_log_probs[step] = lp.cpu()
@@ -588,7 +759,14 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                 _, next_val, _, _ = model(last_batch, rec_state, return_aux=False)
 
             advantages, returns = compute_gae(
-                buf_rewards, buf_values, buf_dones, next_val.cpu(), gamma=gamma, gae_lambda=gae_lambda
+                buf_rewards,
+                buf_values,
+                buf_dones,
+                next_val.cpu(),
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                truncated=buf_truncated,
+                trunc_values=buf_trunc_values,
             )
             adv_norm = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
@@ -617,12 +795,13 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
             chunk_adv = _to_chunks(adv_norm)
             chunk_ret = _to_chunks(returns)
             chunk_next_rays = _to_chunks(buf_next_rays)
+            chunk_aux_valid = _to_chunks(buf_aux_valid)
             chunk_compass = _to_chunks(buf_compass_tgt)
             # chunk_init_gru is list[num_chunks_per_env] of (1, num_envs, gru_dim) -> (total_chunks, gru_dim)
             chunk_gru = torch.cat([g.squeeze(0) for g in chunk_init_gru], dim=0).contiguous()
             chunk_slots = torch.cat(chunk_init_slots, dim=0).contiguous()
 
-            progress = min(1.0, float(upd - start_update) / float(max(1, total_updates)))
+            progress = min(1.0, float(upd) / float(max(1, schedule_total_updates)))
             cur_ent_coef = ent_coef_start + (ent_coef_end - ent_coef_start) * progress
 
             model.train()
@@ -643,6 +822,7 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     mb_adv = chunk_adv[mb_idx].to(device, non_blocking=True)
                     mb_ret = chunk_ret[mb_idx].to(device, non_blocking=True)
                     mb_next_rays = chunk_next_rays[mb_idx].to(device, non_blocking=True)
+                    mb_aux_valid = chunk_aux_valid[mb_idx].to(device, non_blocking=True)
                     mb_compass = chunk_compass[mb_idx].to(device, non_blocking=True)
 
                     mb_h = RecurrentState(
@@ -668,7 +848,8 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     ent_loss = entropy.mean()
 
                     assert aux is not None
-                    ray_loss = F.smooth_l1_loss(aux["next_rays"], mb_next_rays)
+                    ray_elem = F.smooth_l1_loss(aux["next_rays"], mb_next_rays, reduction="none").mean(dim=-1)
+                    ray_loss = (ray_elem * mb_aux_valid).sum() / mb_aux_valid.sum().clamp(min=1.0)
                     compass_loss = F.mse_loss(aux["value_compass"], mb_compass)
 
                     # RND predictor loss
@@ -783,31 +964,19 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     step=global_step,
                 )
 
-            if len(rolling_returns) >= min(10, max(1, num_envs)) and roll_ret > best_mean_return:
-                best_mean_return = roll_ret
-                summary_meta = {
-                    "total_score": round(best_mean_return, 3),
-                    "exit_rate": round(roll_exit, 3),
-                    "mean_act_ms": 0.0,
-                    "p99_act_ms": 0.0,
-                }
-                best_ckpt_path = save_checkpoint(
-                    ckpt_dir / "best.pt",
-                    model=model,
-                    model_config=model_cfg,
-                    global_step=global_step,
-                    update_idx=upd,
-                    scorer_summary=summary_meta,
-                )
-                if best_out_path is not None:
-                    save_checkpoint(
-                        best_out_path,
-                        model=model,
-                        model_config=model_cfg,
-                        global_step=global_step,
-                        update_idx=upd,
-                        scorer_summary=summary_meta,
-                    )
+            if roll_ret > best_train_return and len(rolling_returns) >= min(10, max(1, num_envs)):
+                best_train_return = roll_ret
+
+            tstate_snap = _capture_training_state(upd)
+            latest_summary = {
+                "training_return": round(roll_ret, 3),
+                "training_exit_rate": round(roll_exit, 3),
+                "validation_proxy_score": None if last_val_score is None else round(last_val_score, 3),
+                "best_validation_proxy_score": None if best_val_score == -float("inf") else round(best_val_score, 3),
+                "total_score": 0.0 if best_val_score == -float("inf") else round(best_val_score, 3),
+                "mean_act_ms": 0.0,
+                "p99_act_ms": 0.0,
+            }
 
             if (upd - start_update) % latest_interval == 0 or upd == start_update + total_updates:
                 save_checkpoint(
@@ -816,13 +985,66 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     model_config=model_cfg,
                     global_step=global_step,
                     update_idx=upd,
-                    scorer_summary={
-                        "total_score": round(roll_ret, 3),
-                        "exit_rate": round(roll_exit, 3),
-                        "mean_act_ms": 0.0,
-                        "p99_act_ms": 0.0,
-                    },
+                    scorer_summary=latest_summary,
+                    training_state=tstate_snap,
                 )
+
+            # Fixed-map validation checkpoint selection (separate from training return; local proxy metric).
+            if eval_interval > 0 and (upd % eval_interval == 0) and val_suite_path and Path(val_suite_path).is_file():
+                from training.scorer.score_checkpoint import score_checkpoint as _score_val_ckpt
+
+                val_tmp_ckpt = save_checkpoint(
+                    ckpt_dir / "latest.pt",
+                    model=model,
+                    model_config=model_cfg,
+                    global_step=global_step,
+                    update_idx=upd,
+                    scorer_summary=latest_summary,
+                    training_state=tstate_snap,
+                )
+                val_res = _score_val_ckpt(
+                    checkpoint_path=val_tmp_ckpt,
+                    eval_suite_path=val_suite_path,
+                    device="cpu",
+                )
+                last_val_score = float(val_res["total_score"])
+                print(
+                    f"  [Val @ step {global_step:,}] local_proxy_score={last_val_score:.2f} "
+                    f"(best={best_val_score:.2f}, exit_rate={val_res['exit_rate']*100:.1f}%)",
+                    flush=True,
+                )
+                if last_val_score > best_val_score:
+                    best_val_score = last_val_score
+                    tstate_snap = _capture_training_state(upd)
+                    val_summary = {
+                        "training_return": round(roll_ret, 3),
+                        "validation_proxy_score": round(best_val_score, 3),
+                        "best_validation_proxy_score": round(best_val_score, 3),
+                        "total_score": round(best_val_score, 3),
+                        "exit_rate": round(float(val_res["exit_rate"]), 3),
+                        "mean_act_ms": round(float(val_res["mean_act_ms"]), 3),
+                        "p99_act_ms": round(float(val_res["p99_act_ms"]), 3),
+                        "score_note": "Local proxy score on validation split; official organizer weights are hidden.",
+                    }
+                    best_ckpt_path = save_checkpoint(
+                        ckpt_dir / "best.pt",
+                        model=model,
+                        model_config=model_cfg,
+                        global_step=global_step,
+                        update_idx=upd,
+                        scorer_summary=val_summary,
+                        training_state=tstate_snap,
+                    )
+                    if best_out_path is not None:
+                        save_checkpoint(
+                            best_out_path,
+                            model=model,
+                            model_config=model_cfg,
+                            global_step=global_step,
+                            update_idx=upd,
+                            scorer_summary=val_summary,
+                            training_state=tstate_snap,
+                        )
 
             if upd % save_interval == 0 or upd == start_update + total_updates:
                 last_ckpt_path = save_checkpoint(
@@ -831,6 +1053,8 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     model_config=model_cfg,
                     global_step=global_step,
                     update_idx=upd,
+                    scorer_summary=latest_summary,
+                    training_state=tstate_snap,
                 )
 
     finally:
@@ -845,7 +1069,8 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
         "global_step": global_step,
         "last_loss": last_loss,
         "mean_return": last_mean_return,
-        "best_return": best_mean_return if best_mean_return > -float("inf") else last_mean_return,
+        "best_return": best_train_return if best_train_return > -float("inf") else last_mean_return,
+        "best_validation_proxy_score": best_val_score if best_val_score > -float("inf") else None,
         "checkpoint": str(last_ckpt_path) if last_ckpt_path else None,
         "best_checkpoint": str(best_ckpt_path) if best_ckpt_path else None,
     }
@@ -866,6 +1091,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--save-interval", type=int, default=None)
     parser.add_argument("--latest-interval", type=int, default=None)
+    parser.add_argument("--eval-interval", type=int, default=None, help="Run fixed validation suite every N updates (0=disabled)")
+    parser.add_argument("--val-suite", type=str, default=None, help="Validation suite manifest JSON for best.pt selection")
     parser.add_argument("--coach-interval", type=int, default=None)
     parser.add_argument("--use-llm-coach", action="store_true", default=False)
     parser.add_argument("--curriculum", choices=["plr", "staged"], default=None,
@@ -896,6 +1123,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         cfg["save_interval"] = int(args.save_interval)
     if args.latest_interval is not None:
         cfg["latest_interval"] = int(args.latest_interval)
+    if args.eval_interval is not None:
+        cfg["eval_interval"] = int(args.eval_interval)
+    if args.val_suite is not None:
+        cfg["val_suite"] = args.val_suite
     if args.coach_interval is not None:
         cfg["coach_interval"] = int(args.coach_interval)
     if args.use_llm_coach:
