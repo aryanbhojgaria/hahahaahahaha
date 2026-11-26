@@ -75,18 +75,23 @@ Supported CLI overrides include `--max-steps`, `--total-updates`, `--num-envs`, 
 ### Score on Held-Out Suite & Live Spectator
 
 ```bash
-# Evaluate a checkpoint on the 27-map held-out benchmark suite
+# Evaluate a checkpoint on the 27-map held-out benchmark suite (with per-tier diagnostics)
 uv run python -m training.scorer.score_checkpoint \
   --checkpoint submission/weights/best_agent.pt \
   --suite training/scorer/eval_suite.json \
-  --out eval_results_baseline.json \
+  --out eval_results_diagnostics.json \
   --device cpu
+
+# Compare candidate checkpoints and safely promote only if held-out score improves
+uv run python -m training.scorer.compare_checkpoints \
+  --candidates submission/weights/best_agent.pt runs/staged_main/checkpoints/best.pt \
+  --promote-to submission/weights/best_agent.pt
 
 # Watch the agent live (RGB + 32×32 ego-centric occupancy grid + 64-ray radar)
 uv run python training/visualize_obs.py --checkpoint submission/weights/best_agent.pt --watch --random-maps
 ```
 
-> **Current Submitted Checkpoint (`806.9k` steps):** **`504.13`** total score on 27 held-out maps (`2.22 ms` mean `act()`, `14.09 ms` p99, `validate.py` **PASSED**).
+> **Current Submitted Checkpoint (`377.9k` steps, Staged Curriculum):** **`1440.45`** total score on 27 held-out maps (`14.8%` exit rate, `56` kills, `5.66 ms` mean `act()`, `validate.py` **PASSED**). See [eval_results_diagnostics.json](eval_results_diagnostics.json).
 >
 > ![Training & Held-Out Analytics](docs/training_analytics.png)
 
