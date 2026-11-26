@@ -18,6 +18,7 @@ Supports TWO modes:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 import tempfile
@@ -488,9 +489,42 @@ def main(argv: Optional[list[str]] = None) -> int:
     tmp_wad_dir = Path(tempfile.mkdtemp(prefix="doom-vis-"))
     rng = np.random.default_rng(int(time.time()) % 100_000)
 
+    agent = None
+    telemetry: dict[str, Any] = {}
+    ckpt_path = Path(args.checkpoint) if args.checkpoint else None
+    stage_file = (ckpt_path.parent.parent / "stage_state.json") if ckpt_path is not None else None
+    last_mtime = -1.0
+    last_stage_idx: Optional[int] = None
+    ckpt_step, ckpt_upd = 0, 0
+
+    def _read_stage_state() -> Optional[dict[str, Any]]:
+        if stage_file is None or not stage_file.is_file():
+            return None
+        try:
+            return json.loads(stage_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
     def _next_wad(ep_idx: int) -> tuple[Path, str]:
+        nonlocal last_stage_idx
         if args.wad:
             return Path(args.wad), Path(args.wad).name
+        st = _read_stage_state()
+        if st is not None:
+            last_stage_idx = int(st.get("stage_idx", 0))
+            st_name = str(st.get("stage", "staged"))
+            tiers = st.get("tiers") or [1]
+            knobs = {**dict(st.get("knobs") or {}), "out_dir": str(tmp_wad_dir)}
+            alpha = float(st.get("scaffolding_alpha", 0.0))
+            if st.get("fixed_seed") is not None:
+                seed = int(st["fixed_seed"])
+                tier = int(tiers[0])
+                wad_p, _ = MapGen.sample(tier=tier, knobs=knobs, seed=seed, scaffolding_alpha=alpha)
+                return Path(wad_p), f"Stage {last_stage_idx}:{st_name} (s={seed})"
+            tier = int(rng.choice(tiers))
+            seed = int(rng.integers(200_000, 999_999))
+            wad_p, _ = MapGen.sample(tier=tier, knobs=knobs, seed=seed, scaffolding_alpha=alpha)
+            return Path(wad_p), f"Stage {last_stage_idx}:{st_name} T{tier} s={seed}"
         if args.random_maps:
             tier = int(rng.choice([1, 2, 2, 3, 4]))
             seed = int(rng.integers(200_000, 999_999))
@@ -499,12 +533,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             seed = args.seed + ep_idx - 1
         wad_p, _ = MapGen.sample(tier=tier, knobs={"out_dir": str(tmp_wad_dir)}, seed=seed)
         return Path(wad_p), f"T{tier} s={seed}"
-
-    agent = None
-    telemetry: dict[str, Any] = {}
-    ckpt_path = Path(args.checkpoint) if args.checkpoint else None
-    last_mtime = -1.0
-    ckpt_step, ckpt_upd = 0, 0
     if ckpt_path is not None:
         from gymnasium.spaces import Box, MultiBinary
         from submission.agent import DoomAgent
@@ -573,6 +601,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 print(f"[Spectator] Hot-reloaded weights -> step={ckpt_step:,} upd={ckpt_upd}", flush=True)
                         except Exception:
                             pass
+                    if not args.wad:
+                        st_now = _read_stage_state()
+                        if st_now is not None and int(st_now.get("stage_idx", 0)) != last_stage_idx:
+                            force_new_map = True
 
             t0 = time.perf_counter()
             act = agent.act(obs) if agent is not None else _read_keyboard_action()

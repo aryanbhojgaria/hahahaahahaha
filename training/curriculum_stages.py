@@ -11,7 +11,9 @@ with an explicit ladder the agent has to climb:
 
 A stage is "mastered" when the rolling exit-rate over the last `window` episodes reaches its
 threshold (after `min_episodes`), or when `max_steps_per_stage` is spent (so it never stalls).
-`stage_lock` pins a run to one stage: used so teammates can train one specialist each in parallel.
+`stage_lock` pins a run to one stage; `stage_max` caps the highest stage index reachable.
+Stages >= 1 also apply a balanced within-stage replay buffer (softened temperature=0.7,
+staleness_coef=0.35) so hard levels do not collapse replay onto a single seed.
 
 Training seeds always come from [100_000, 999_999] (disjoint from held-out [1_000, 9_999]).
 Uses no network / no LLM. It is a plain feedback rule on the training GPU run's own telemetry.
@@ -20,6 +22,7 @@ Uses no network / no LLM. It is a plain feedback rule on the training GPU run's 
 from __future__ import annotations
 
 import json
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,10 +96,15 @@ class StageCurriculum:
     stages: list[StageSpec] = field(default_factory=lambda: list(DEFAULT_STAGES))
     stage_idx: int = 0
     stage_lock: Optional[int] = None
+    stage_max: Optional[int] = None
     window: int = 64
     min_episodes: int = 64
     min_steps_per_stage: int = 100_000
     max_steps_per_stage: int = 1_500_000
+    replay_prob: float = 0.4
+    temperature: float = 0.7
+    staleness_coef: float = 0.35
+    buffer_capacity: int = 128
     seed: int = 7
     state_path: Optional[Path] = None
 
@@ -105,9 +113,12 @@ class StageCurriculum:
         self._exits: deque[float] = deque(maxlen=self.window)
         self._episodes_in_stage = 0
         self._stage_start_step = 0
+        self._replay_tick = 0
+        self._stage_buffer: dict[str, dict[str, Any]] = {}
         if self.stage_lock is not None:
             self.stage_idx = int(self.stage_lock)
-        self.stage_idx = max(0, min(len(self.stages) - 1, int(self.stage_idx)))
+        cap = len(self.stages) - 1 if self.stage_max is None else min(len(self.stages) - 1, int(self.stage_max))
+        self.stage_idx = max(0, min(max(0, cap), int(self.stage_idx)))
         self._used: set[int] = set()
 
     # ------------------------------------------------------------------ queries
@@ -131,14 +142,62 @@ class StageCurriculum:
                 return s
         return int(self.rng.integers(TRAIN_SEED_MIN, TRAIN_SEED_MAX + 1))
 
+    def _sample_from_buffer(self, sp: StageSpec) -> Optional[dict[str, Any]]:
+        entries = list(self._stage_buffer.values())
+        n = len(entries)
+        if n < 8:
+            return None
+        scores = np.array([max(1e-6, float(e["score"])) for e in entries], dtype=np.float64)
+        order = np.argsort(-scores)
+        ranks = np.empty(n, dtype=np.float64)
+        ranks[order] = np.arange(1, n + 1, dtype=np.float64)
+        temp = max(1e-3, float(self.temperature))
+        p_score = (1.0 / ranks) ** (1.0 / temp)
+        p_score /= p_score.sum()
+
+        stale = np.array([max(0.0, float(self._replay_tick - int(e["last_seen"]))) for e in entries], dtype=np.float64)
+        p_stale = stale / stale.sum() if stale.sum() > 0 else np.full(n, 1.0 / n, dtype=np.float64)
+
+        sc = max(0.0, min(1.0, float(self.staleness_coef)))
+        probs = (1.0 - sc) * p_score + sc * p_stale
+        probs /= probs.sum()
+        idx = int(self.rng.choice(n, p=probs))
+        chosen = entries[idx]
+        chosen["last_seen"] = self._replay_tick
+        return {
+            "level_id": chosen["level_id"],
+            "tier": int(chosen["tier"]),
+            "knobs": dict(sp.knobs),
+            "seed": int(chosen["seed"]),
+            "scaffolding_alpha": float(sp.scaffolding_alpha),
+        }
+
     def sample(self) -> dict[str, Any]:
         """Return a level dict compatible with `PLRBuffer.sample_level` consumers in ppo.py."""
+        self._replay_tick += 1
         sp = self.spec
+        if sp.fixed_seed is None and len(self._stage_buffer) >= 8 and self.rng.random() < float(self.replay_prob):
+            replayed = self._sample_from_buffer(sp)
+            if replayed is not None:
+                return replayed
+
         p = np.asarray(sp.tier_probs, dtype=np.float64)
         tier = int(self.rng.choice(list(sp.tiers), p=p / p.sum()))
         seed = sp.fixed_seed if sp.fixed_seed is not None else self._fresh_seed()
+        level_id = f"stage{self.stage_idx}_t{tier}_s{seed}"
+        if sp.fixed_seed is None:
+            if len(self._stage_buffer) >= max(8, int(self.buffer_capacity)):
+                evict_id = min(self._stage_buffer, key=lambda k: float(self._stage_buffer[k]["score"]))
+                self._stage_buffer.pop(evict_id, None)
+            self._stage_buffer[level_id] = {
+                "level_id": level_id,
+                "tier": int(tier),
+                "seed": int(seed),
+                "score": 1.0,
+                "last_seen": self._replay_tick,
+            }
         return {
-            "level_id": f"stage{self.stage_idx}_t{tier}_s{seed}",
+            "level_id": level_id,
             "tier": tier,
             "knobs": dict(sp.knobs),
             "seed": int(seed),
@@ -146,13 +205,27 @@ class StageCurriculum:
         }
 
     # ------------------------------------------------------------------ feedback
-    def report_episode(self, exit_reached: bool) -> None:
+    def report_episode(
+        self,
+        exit_reached: bool,
+        level_id: Optional[str] = None,
+        score: float = 1.0,
+    ) -> None:
         self._exits.append(1.0 if exit_reached else 0.0)
         self._episodes_in_stage += 1
+        if level_id and level_id in self._stage_buffer:
+            s_val = float(score) if not math.isnan(float(score)) else 1.0
+            self._stage_buffer[level_id]["score"] = max(0.0, s_val)
+            self._stage_buffer[level_id]["last_seen"] = self._replay_tick
 
     def maybe_advance(self, global_step: int) -> Optional[str]:
         """Advance to the next stage when mastered (or out of budget). Returns a log line if it moved."""
-        if self.stage_lock is not None or self.stage_idx >= len(self.stages) - 1:
+        cap = (
+            len(self.stages) - 1
+            if self.stage_max is None
+            else min(len(self.stages) - 1, int(self.stage_max))
+        )
+        if self.stage_lock is not None or self.stage_idx >= cap:
             return None
         if self._stage_start_step == 0 and self._episodes_in_stage == 0:
             self._stage_start_step = global_step
@@ -169,6 +242,7 @@ class StageCurriculum:
         old_rate = self.exit_rate()
         self.stage_idx += 1
         self._exits.clear()
+        self._stage_buffer.clear()
         self._episodes_in_stage = 0
         self._stage_start_step = global_step
         why = "MASTERED" if mastered else "step budget spent"
@@ -180,9 +254,17 @@ class StageCurriculum:
     def save(self) -> None:
         if self.state_path is None:
             return
+        sp = self.spec
+        payload = {
+            "stage_idx": int(self.stage_idx),
+            "stage": str(sp.name),
+            "tiers": [int(t) for t in sp.tiers],
+            "knobs": dict(sp.knobs),
+            "fixed_seed": None if sp.fixed_seed is None else int(sp.fixed_seed),
+            "scaffolding_alpha": float(sp.scaffolding_alpha),
+            "exit_rate": round(self.exit_rate(), 4),
+        }
         try:
-            self.state_path.write_text(
-                json.dumps({"stage_idx": self.stage_idx, "stage": self.spec.name}), encoding="utf-8"
-            )
+            self.state_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
             pass

@@ -347,13 +347,20 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     stager: Optional[StageCurriculum] = None
     if str(cfg.get("curriculum", "plr")).lower() == "staged" and not fixed_wad:
         lock = cfg.get("stage_lock")
+        s_max = cfg.get("stage_max")
+        plr_sub = dict(cfg.get("plr", {}))
         stager = StageCurriculum(
             stage_idx=int(cfg.get("stage_start", 0)),
             stage_lock=None if lock is None else int(lock),
+            stage_max=None if s_max is None else int(s_max),
             window=int(cfg.get("stage_window", 64)),
             min_episodes=int(cfg.get("stage_min_episodes", 64)),
             min_steps_per_stage=int(cfg.get("stage_min_steps", 100_000)),
             max_steps_per_stage=int(cfg.get("stage_max_steps", 1_500_000)),
+            replay_prob=float(plr_sub.get("replay_prob", 0.4)),
+            temperature=float(plr_sub.get("temperature", 0.7)),
+            staleness_coef=float(plr_sub.get("staleness_coef", 0.35)),
+            buffer_capacity=int(plr_sub.get("buffer_size", 128)),
             seed=seed,
             state_path=output_dir / "stage_state.json",
         )
@@ -516,10 +523,14 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                         rolling_kills.append(k_val)
                         ep_returns[i] = 0.0
                         odom_states[i] = None
+                        old_lvl = env_levels[i]
                         if stager is not None:
-                            stager.report_episode(bool(completed_exits[-1]))
+                            stager.report_episode(
+                                bool(completed_exits[-1]),
+                                level_id=old_lvl["level_id"] if old_lvl is not None else None,
+                                score=abs(ep_ret_val) + 0.5,
+                            )
                         if not fixed_wad:
-                            old_lvl = env_levels[i]
                             if old_lvl is not None and stager is None:
                                 plr.update_score(old_lvl["level_id"], abs(ep_ret_val) + 0.5, upd)
                             new_lvl = _next_level(upd)
@@ -699,8 +710,17 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                 stage_msg = stager.maybe_advance(global_step)
                 if stage_msg:
                     print(stage_msg, flush=True)
+                    save_checkpoint(
+                        ckpt_dir / f"stage_{stager.stage_idx - 1}_mastered.pt",
+                        model=model,
+                        model_config=model_cfg,
+                        global_step=global_step,
+                        update_idx=upd,
+                    )
+                else:
+                    stager.save()
 
-            if use_llm_coach and not fixed_wad and stager is None and (upd % coach_interval == 0):
+            if use_llm_coach and not fixed_wad and (upd % coach_interval == 0):
                 telemetry = {
                     "global_step": global_step,
                     "update_idx": upd,
@@ -709,15 +729,21 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     "mean_kills": round(roll_kill, 3),
                     "stuck_rate": 0.25 if roll_ret < -3.0 else 0.10,
                     "sector_coverage": min(1.0, max(0.2, 0.5 + 0.03 * roll_ret)),
+                    "stage": stager.name if stager is not None else "plr",
                 }
-                cur_knobs = {
-                    "num_rooms": int(4 + round(plr.global_knobs.get("num_rooms_offset", 0.0))),
-                    "enemies_per_room": round(2.0 * float(plr.global_knobs.get("enemies_per_room_mult", 1.0)), 2),
-                    "ammo_mult": float(plr.global_knobs.get("ammo_mult", 1.0)),
-                }
-                advised = advise_curriculum(telemetry, cur_knobs)
-                plr.update_knobs(advised)
-                print(f"  [LLMCoach @ step {global_step:,}] updated PLR knobs -> {advised}", flush=True)
+                if stager is None:
+                    cur_knobs = {
+                        "num_rooms": int(4 + round(plr.global_knobs.get("num_rooms_offset", 0.0))),
+                        "enemies_per_room": round(2.0 * float(plr.global_knobs.get("enemies_per_room_mult", 1.0)), 2),
+                        "ammo_mult": float(plr.global_knobs.get("ammo_mult", 1.0)),
+                    }
+                    advised = advise_curriculum(telemetry, cur_knobs)
+                    plr.update_knobs(advised)
+                    print(f"  [LLMCoach @ step {global_step:,}] updated PLR knobs -> {advised}", flush=True)
+                else:
+                    cur_knobs = dict(stager.spec.knobs) or {"num_rooms": 4, "enemies_per_room": 2.0, "ammo_mult": 1.0}
+                    advised = advise_curriculum(telemetry, cur_knobs)
+                    print(f"  [LLMCoach @ step {global_step:,}] advisory ({stager.name}) -> {advised}", flush=True)
 
             upd_dt = max(1e-6, time.perf_counter() - upd_t0)
             sps = steps_per_update / upd_dt
@@ -845,6 +871,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--curriculum", choices=["plr", "staged"], default=None,
                         help="staged = single map -> easy -> medium -> hard -> random ladder")
     parser.add_argument("--stage-start", type=int, default=None, help="first stage index (0..4)")
+    parser.add_argument("--stage-max", type=int, default=None, help="highest stage index reachable (0..4)")
     parser.add_argument("--stage-lock", type=int, default=None,
                         help="train ONLY this stage (0 single_map,1 easy,2 medium,3 hard,4 random)")
     parser.add_argument("--stage-max-steps", type=int, default=None, help="step budget per stage before forced advance")
@@ -877,6 +904,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         cfg["curriculum"] = args.curriculum
     if args.stage_start is not None:
         cfg["stage_start"] = int(args.stage_start)
+    if args.stage_max is not None:
+        cfg["stage_max"] = int(args.stage_max)
     if args.stage_lock is not None:
         cfg["curriculum"] = "staged"
         cfg["stage_lock"] = int(args.stage_lock)

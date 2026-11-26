@@ -116,7 +116,7 @@ def _chat_completion(prompt: str, timeout: float = 15.0) -> Optional[str]:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
-            "max_tokens": 300,
+            "max_tokens": 1024,
         }
     ).encode("utf-8")
 
@@ -126,6 +126,7 @@ def _chat_completion(prompt: str, timeout: float = 15.0) -> Optional[str]:
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            "User-Agent": "OpenAI/Python 1.50.0",
         },
         method="POST",
     )
@@ -138,7 +139,7 @@ def _chat_completion(prompt: str, timeout: float = 15.0) -> Optional[str]:
         if not choices:
             return None
         msg = choices[0].get("message") or {}
-        content = msg.get("content")
+        content = msg.get("content") or msg.get("reasoning_content") or msg.get("reasoning")
         return str(content) if content else None
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError, ValueError):
         return None

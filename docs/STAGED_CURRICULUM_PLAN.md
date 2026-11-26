@@ -1,35 +1,56 @@
-# Staged Curriculum Restart — who trains what
+# Staged Curriculum Restart — 4-Person Specialist & Combiner Workflow
 
-**Why we restarted:** the old run sampled `tier_weights [1, 1.5, 2.5, 3.0]` → ~75% Tier‑3/4 maps and PLR (temperature 0.1) kept
-replaying the single hardest level. After 800k steps: `exit=0%`, `ret≈-5.7`. The agent never saw an easy win, so it had nothing to learn from.
+**Why we restarted cleanly:**
+1. The original `ppo_curriculum.yaml` used `tier_weights: [1.0, 1.5, 2.5, 3.0]` (~75% Tier 3–4 hard maps from step 0) and aggressive PLR (`temperature: 0.1, staleness_coef: 0.1`), which trapped replay onto the hardest maps with `exit=0%`.
+2. Resuming from the old `806.9k` checkpoint carried over its ingrained spinning/looping habit. Starting **fresh** (`seed: 42`, zero `--resume` of the looping weights) on Stage 0 (`single_map`) reaches `100%` exits immediately and lets every teammate's weights stay mutually compatible for merging.
 
-**New ladder** (`training/curriculum_stages.py`, config `training/configs/ppo_staged.yaml`, no LLM / no API needed):
+**5-Stage Progressive Ladder** (`training/curriculum_stages.py`, `training/configs/ppo_staged.yaml`):
 
-| Stage | `--stage-lock` | Maps | Advances when rolling exit-rate ≥ |
+| Stage | `--stage-lock` / `--stage-max` | Maps | Advances when rolling exit-rate ≥ |
 |---|---|---|---|
-| 0 single_map | 0 | ONE fixed map, no enemies | 80% |
-| 1 easy | 1 | Tier 1, random seeds, ~1 enemy/room | 60% |
-| 2 medium | 2 | Tier 1–2, doors, ~1.5 enemies/room | 45% |
-| 3 hard | 3 | Tier 2/3/4 (keycards, multi-lock) | 30% |
-| 4 random | 4 | all tiers mixed | — (final) |
+| **0: `single_map`** | `0` | ONE fixed map (`seed=123457`), `0` enemies (learn: reach exit fast) | `80%` |
+| **1: `easy`** | `1` | Tier 1, random seeds, ~1 weak enemy/room, generous ammo | `60%` |
+| **2: `medium`** | `2` | Tiers 1–2, unlocked doors, ~1.5 enemies/room | `45%` |
+| **3: `hard`** | `3` | Tiers 2–4, keycards & multi-room exploration | `30%` |
+| **4: `random`** | `4` | All Tiers 1–4 equally mixed (zero-shot generalization) | Final stage |
 
-Training seeds stay in `[100000, 999999]` (held-out `[1000, 9999]` untouched). `best_out` is empty, so nothing overwrites `submission/weights/`.
+Within stages `>= 1`, balanced replay (`temperature: 0.7`, `staleness_coef: 0.35`) ensures the buffer stays diverse. Training seeds remain strictly in `[100_000, 999_999]` (held-out `[1_000, 9_999]` untouched). `best_out` is blank so nothing overwrites `submission/weights/best_agent.pt` prematurely.
 
-## Division of work (all start from the same warm init = `submission/weights/best_agent.pt`, 806.9k steps)
+---
 
-| Person | Machine | Trains | Command |
+## Division of Work (All 4 Train Fresh with `seed: 42` — NO `--resume`!)
+
+First, every teammate pulls the latest code:
+```bash
+git pull origin main && git lfs pull
+```
+
+| Person | Hardware | Role / Stages | Exact Command |
 |---|---|---|---|
-| **Vedesh** | RTX GPU | full chain stage 0 → 1 → 2 → … (auto-advance) + final random fine-tune + merge/eval | `python -u -m training.ppo --config training/configs/ppo_staged.yaml --resume submission/weights/best_agent.pt --device cuda --output-dir runs/staged_main` |
-| **Aryan** | Mac | **easy → medium** specialist (stage 1) | `... --stage-lock 1 --num-envs 8 --device cpu --output-dir runs/stage1_aryan` |
-| **Aman** | Mac | **medium → hard** specialist (stage 2) | `... --stage-lock 2 --num-envs 8 --device cpu --output-dir runs/stage2_aman` |
-| **Swapnil** | Mac | **hard / further** specialist (stage 3) | `... --stage-lock 3 --num-envs 8 --device cpu --output-dir runs/stage3_swapnil` |
+| **Vedesh** | RTX GPU | Full backbone (`0 → 1 → 2 → 3 → 4`) + final merge/eval | `python -u -m training.ppo --config training/configs/ppo_staged.yaml --device cuda --output-dir runs/staged_main --use-llm-coach` |
+| **Aryan** | Mac | Specialist 1: **Single Map → Easy → Medium** (`0 → 2`) | `python -u -m training.ppo --config training/configs/ppo_staged.yaml --stage-start 0 --stage-max 2 --num-envs 8 --device cpu --output-dir runs/stage_aryan` |
+| **Aman** | Mac | Specialist 2: **Single Map → Medium → Hard** (`0 → 3`) | `python -u -m training.ppo --config training/configs/ppo_staged.yaml --stage-start 0 --stage-max 3 --num-envs 8 --device cpu --output-dir runs/stage_aman` |
+| **Swapnil** | Mac | Specialist 3: **Further Moving → Random** (`0 → 4`, faster step cap) | `python -u -m training.ppo --config training/configs/ppo_staged.yaml --stage-start 0 --stage-max 4 --stage-max-steps 150000 --num-envs 8 --device cpu --output-dir runs/stage_swapnil` |
 
-Each teammate uses the same flags as the Vedesh command (`--config training/configs/ppo_staged.yaml --resume submission/weights/best_agent.pt`) plus the lock/output flags above.
-Everyone: commit `runs/<name>/metrics.csv` (small) and send the best `checkpoints/latest.pt` to Vedesh (LFS or drive). **Do not push to `submission/weights/`.**
+Everyone commits `runs/<name>/metrics.csv` (small) and sends their best `runs/<name>/checkpoints/best.pt` (or `latest.pt`) to Vedesh when ready. **Do not push directly over `submission/weights/best_agent.pt`.**
 
-## Combine
-1. Vedesh scores every checkpoint on the 27-map held-out suite (`score_checkpoint.py`).
-2. Try (a) sequential hand-off: best stage‑1 → stage‑2 → stage‑3 → stage‑4 fine-tune, and (b) weight average ("soup") of the specialists + a short stage‑4 random fine-tune.
-3. Promote only if held-out total > 504.13 (current submission) and `validate.py` passes. Otherwise keep the current weights.
+---
 
-Caveat: averaging RL policies can hurt (GRU state); that is why step 3 is gated on the held-out score.
+## Combine & Promote (`training/combine_specialists.py`)
+
+Once checkpoints are collected, Vedesh runs the automated combiner on the RTX GPU:
+```bash
+python -m training.combine_specialists \
+  --checkpoints runs/staged_main/checkpoints/best.pt runs/stage_aryan/checkpoints/best.pt runs/stage_aman/checkpoints/best.pt runs/stage_swapnil/checkpoints/best.pt \
+  --suite training/scorer/eval_suite.json \
+  --finetune-steps 16384 \
+  --device cuda \
+  --out runs/combined/best_combined.pt \
+  --promote-if-above 504.13
+```
+
+What this does:
+1. Scores every existing specialist on the 27-map held-out suite (`eval_suite.json`).
+2. Builds a softmax score-weighted parameter soup (`soup_raw.pt`).
+3. Runs a Stage-4 (`random` all-tiers) consolidation fine-tune (`16,384` steps) on CUDA so the GRU and actor-critic heads co-adapt (`soup_finetuned`).
+4. Compares `best_single`, `soup_raw`, and `soup_finetuned`, writes `runs/combined/combine_report.json`, and promotes to `submission/weights/best_agent.pt` **only** if it beats our current `504.13` submission (then run `python validate.py`).
