@@ -225,6 +225,43 @@ def _rnd_feature_vector(inp: ModelInputs) -> torch.Tensor:
     return torch.cat([inp.rays.flatten(1), inp.vitals], dim=-1)
 
 
+
+def _observation_teacher_loss(logits: torch.Tensor, rays: torch.Tensor, action_mask: torch.Tensor, vitals: Optional[torch.Tensor] = None, nav_coef: float = 0.0, fwd_clear: float = 0.06) -> torch.Tensor:
+    """Training-only supervised signal derived from the agent's OWN ray observation.
+
+    rays: (..., 8, 64) from preprocess(); rows 2..7 one-hot hit type (6 = enemy, 4 = door, 5 = locked),
+    row 0 = normalised distance. Ray 0 points straight ahead; rays 1..8 are to the LEFT,
+    rays 56..63 to the RIGHT (verified: TURN_LEFT moves enemy rays toward lower-right indices).
+      ATTACK  <- enemy under the crosshair (rays 63, 0, 1)
+      USE     <- door / locked door straight ahead within ~90 map units
+      TURN_L/R<- an enemy is visible off-centre on that side and nothing is under the crosshair
+    """
+    enemy = rays[..., 6, :]
+    aimed = torch.maximum(torch.maximum(enemy[..., 0], enemy[..., 1]), enemy[..., 63])
+    left = enemy[..., 2:9].amax(-1)
+    right = enemy[..., 56:63].amax(-1)
+    door_ahead = torch.maximum(rays[..., 4, 0], rays[..., 5, 0]) * (rays[..., 0, 0] < 0.09).float()
+    m = action_mask.float()
+    bce = F.binary_cross_entropy_with_logits
+    l_att = bce(logits[..., 6], aimed, weight=m[..., 6])
+    l_use = bce(logits[..., 7], door_ahead, weight=m[..., 7])
+    turn_w = ((left + right) > 0).float() * (1.0 - aimed)
+    l_tl = bce(logits[..., 4], left * (1.0 - right), weight=turn_w * m[..., 4])
+    l_tr = bce(logits[..., 5], right * (1.0 - left), weight=turn_w * m[..., 5])
+    total = l_att + l_use + 0.5 * (l_tl + l_tr)
+    if nav_coef > 0.0:
+        # FWD <- path ahead open (front rays beyond ~150 units); BACK <- never needed
+        front = torch.minimum(torch.minimum(rays[..., 0, 0], rays[..., 0, 1]), rays[..., 0, 63])
+        clear = (front > fwd_clear).float()
+        l_fwd = bce(logits[..., 0], clear, weight=m[..., 0])
+        l_back = bce(logits[..., 1], torch.zeros_like(clear), weight=m[..., 1])
+        total = total + nav_coef * (l_fwd + l_back)
+    if vitals is not None:
+        # SELECT_NEXT_WEAPON <- only when the selected weapon is (nearly) out of ammo (vitals[26])
+        low_ammo = (vitals[..., 26] > 0.5).float()
+        total = total + bce(logits[..., 8], low_ammo, weight=m[..., 8])
+    return total
+
 def _bernoulli_kl(logits_p: torch.Tensor, logits_q: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Elementwise KL(Bernoulli(p) || Bernoulli(q)) masked by `mask`, summed over action dim."""
     mask_f = mask.bool().to(dtype=torch.float32)
@@ -286,6 +323,11 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     bc_kl_decay_steps = max(1, int(cfg.get("bc_kl_decay_steps", 4_000_000)))
     # RGB dropout defaults to 0.0 in PPO so rollout old_log_prob and update new_log_prob match identically.
     rgb_dropout_p = float(cfg.get("rgb_dropout_p", 0.0))
+    teacher_coef = float(cfg.get("teacher_coef", 0.0))
+    teacher_v2 = bool(cfg.get("teacher_v2", False))
+    nav_coef = float(cfg.get("teacher_nav_coef", 0.0))
+    fwd_clear = float(cfg.get("teacher_fwd_clear", 0.06))
+    last_teacher_loss = 0.0
     steps_per_update = num_envs * rollout_steps
     # max_steps semantics: additional environment steps to run in this training invocation.
     if cfg.get("max_steps") is not None:
@@ -865,6 +907,10 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                         + compass_coef * compass_loss
                         + rnd_loss
                     )
+                    if teacher_coef > 0.0:
+                        t_loss = _observation_teacher_loss(logits, mb_dict["rays"], mb_dict["action_mask"], mb_dict["vitals"] if teacher_v2 else None, nav_coef, fwd_clear)
+                        loss = loss + teacher_coef * t_loss
+                        last_teacher_loss = float(t_loss.item())
 
                     if bc_anchor is not None and bc_beta > 0.0:
                         with torch.no_grad():
@@ -936,7 +982,7 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     f"[Upd {upd}/{start_update + total_updates} | step {global_step:,} | "
                     f"{sps:.0f} SPS | {elapsed_m:.1f}m] ret={roll_ret:+.2f} "
                     f"exit={roll_exit*100:.1f}% kills={roll_kill:.2f} "
-                    f"loss={last_loss:.4f} ent={cur_ent_coef:.4f}{stage_tag}",
+                    f"loss={last_loss:.4f} ent={cur_ent_coef:.4f} teach={last_teacher_loss:.3f}{stage_tag}",
                     flush=True,
                 )
                 # Machine-readable metrics for analytics charts (committed to GitHub).
