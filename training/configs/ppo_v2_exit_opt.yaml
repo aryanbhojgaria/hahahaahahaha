@@ -10,7 +10,7 @@ stage_max_steps: 10000000
 
 resume_checkpoint: "runs/bc_dagger_v2/bc_round0.pt"
 bc_anchor_checkpoint: "runs/bc_dagger_v2/bc_round0.pt"
-bc_kl_beta_init: 0.035
+bc_kl_beta_init: 0.06
 bc_kl_decay_steps: 2000000
 bc_enabled: true
 
@@ -22,7 +22,7 @@ minibatch_chunks: 8
 gamma: 0.99
 gae_lambda: 0.95
 clip_coef: 0.15
-lr: 8.0e-5
+lr: 5.0e-5
 max_grad_norm: 0.5
 vf_coef: 0.5
 ent_coef: 0.008
@@ -46,13 +46,17 @@ tier_weights: [0.15, 0.25, 0.30, 0.30]
 reward_weights:
   exit: 30.0
   exit_speed: 6.0
+  door: 3.0
   key: 10.0
   locked_door: 12.0
+  kill: 2.5
+  damage: -0.04
+  death: -8.0
   key_approach: 1.5
-  locked_door_no_key: -0.12
+  locked_door_no_key: -0.15
   stuck: -0.10
   loop_penalty: -0.05
-  empty_wall_shot: -0.08
+  empty_wall_shot: -0.015
   unnecessary_weapon_swap: -0.06
   wall_spin: -0.04
 worker_max_episodes: 100

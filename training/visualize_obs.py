@@ -400,7 +400,7 @@ def _draw_analytics_panel(
         f"Ep #{hud_meta.get('episode', 1):<3d} Step {hud_meta.get('ep_step', 0):<4d} Exit {hud_meta.get('exits', 0)}",
         f"HP {v[0]:3.0f} | Arm {v[1]:3.0f} | Ammo {v[3]:3.0f} | Key {int(np.sum(v[8:14]))}",
         f"Act Latency: {hud_meta.get('act_ms', 0.0):.2f} ms | Kills {hud_meta.get('kills', 0)}",
-        f"Start: {hud_meta.get('ep_start_str', '--:--:--')} | Stop: {hud_meta.get('ep_stop_str', 'LIVE')} ({hud_meta.get('ep_elapsed_s', 0.0):.1f}s)",
+        f"Start: {hud_meta.get('ep_start_str', '--:--:--')} ({hud_meta.get('ep_elapsed_s', 0.0):.1f}s) | Prev: {hud_meta.get('last_outcome', '--')}@{hud_meta.get('ep_stop_str', '--:--:--')}",
     ]
     for s in stats:
         screen.blit(small_font.render(s, True, (215, 222, 235)), (x0 + 12, ly))
@@ -580,7 +580,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     ent_hist: deque[float] = deque(maxlen=90)
     ep_start_str = time.strftime("%H:%M:%S")
     ep_start_t = time.perf_counter()
-    last_stop_str = "LIVE"
+    last_stop_str = "--:--:--"
+    last_outcome = "--"
 
     last_watch_check = time.perf_counter()
     running = True
@@ -639,6 +640,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             if terminated or truncated or force_new_map:
                 if info.get("exit_reached", False):
                     exits_count += 1
+                    last_outcome = "EXIT"
+                elif bool(priv_now.get("dead", False)):
+                    last_outcome = "DEAD"
+                elif truncated:
+                    last_outcome = "TIME"
+                else:
+                    last_outcome = "SKIP"
                 last_stop_str = time.strftime("%H:%M:%S")
                 ep_idx += 1
                 ep_step = 0
@@ -687,6 +695,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "kills": int(priv_now.get("kills", 0)),
                 "ep_start_str": ep_start_str,
                 "ep_stop_str": last_stop_str,
+                "last_outcome": last_outcome,
                 "ep_elapsed_s": time.perf_counter() - ep_start_t,
             }
             _draw_analytics_panel(
