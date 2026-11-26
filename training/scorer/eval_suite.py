@@ -75,6 +75,14 @@ def get_default_eval_suite(repo_root: Path | None = None) -> list[EvalMapSpec]:
     return specs
 
 
+def _resolve_wad_path(wad: str) -> str:
+    if wad == "freedoom2.wad":
+        from doom_env.wrapper import IWAD
+
+        return str(IWAD)
+    return wad
+
+
 def load_eval_suite_from_json(json_path: Path | str) -> list[EvalMapSpec]:
     """Loads map specifications from a JSON manifest (Schema.md §5.1)."""
     with open(json_path, "r", encoding="utf-8") as f:
@@ -85,7 +93,7 @@ def load_eval_suite_from_json(json_path: Path | str) -> list[EvalMapSpec]:
         specs.append(
             EvalMapSpec(
                 id=item["id"],
-                wad_path=item["wad"],
+                wad_path=_resolve_wad_path(item["wad"]),
                 map_name=item.get("map_name", "MAP01"),
                 tier=int(item["tier"]),
                 episode_ticks=int(item.get("episode_ticks", 2100)),
