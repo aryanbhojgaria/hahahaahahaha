@@ -22,6 +22,7 @@ def run_judge_daemon(
     incoming_dir: Path | str = "runs/incoming",
     eval_suite_path: Path | str = "training/scorer/eval_suite.json",
     poll_interval_s: int = 30,
+    dry_run: bool = False,
 ) -> None:
     inc_dir = Path(incoming_dir)
     inc_dir.mkdir(parents=True, exist_ok=True)
@@ -37,6 +38,10 @@ def run_judge_daemon(
 
     best_score = max([v.get("total_score", 0.0) for v in scored_history.values()], default=0.0)
     print(f"[JudgeDaemon] Starting watch on {inc_dir.resolve()}. Current best score: {best_score:.2f}")
+
+    if dry_run:
+        print("[JudgeDaemon] Dry run mode enabled — verified daemon startup cleanly.")
+        return
 
     try:
         while True:
@@ -87,6 +92,7 @@ if __name__ == "__main__":
     parser.add_argument("--incoming-dir", type=str, default="runs/incoming")
     parser.add_argument("--suite", type=str, default="training/scorer/eval_suite.json")
     parser.add_argument("--interval", type=int, default=30)
+    parser.add_argument("--dry_run", "--dry-run", action="store_true", help="Perform smoke test and exit")
     args = parser.parse_args()
 
-    run_judge_daemon(args.incoming_dir, args.suite, args.interval)
+    run_judge_daemon(args.incoming_dir, args.suite, args.interval, dry_run=args.dry_run)

@@ -29,10 +29,16 @@ WEIGHTS_DIR = SUBMISSION_DIR / "weights"
 DEFAULT_CHECKPOINT_PATH = WEIGHTS_DIR / "best_agent.pt"
 
 
+class _NoStateType:
+    pass
+
+_NO_STATE = _NoStateType()
+
+
 class DoomAgent:
     """Zero-Shot Autonomous DOOM Agent."""
 
-    def __init__(self, observation_space, action_space, device: str):
+    def __init__(self, observation_space=None, action_space=None, device: str = "cpu"):
         """Called once. Load weights onto `device` ("cuda" or "cpu")."""
         # Strict latency guard: enforce 1 CPU thread to avoid competing with ViZDoom engine
         if device == "cpu":
@@ -69,22 +75,72 @@ class DoomAgent:
         self.odom_state: OdomGridState | None = None
         self.recurrent_state: RecurrentState | None = None
 
-    def reset(self) -> None:
+    def reset(self) -> Any:
         """Called before every map. Clear recurrent state, memory buffers and trackers."""
         self.odom_state = OdomGridState.zeros()
         self.recurrent_state = None
         self.rng = np.random.default_rng(0)
+        return self.recurrent_state
 
     @torch.inference_mode()
-    def act(self, observation: dict) -> np.ndarray:
-        """Return a MultiBinary action: int array of shape action_space.shape with values in {0, 1}."""
+    def act(self, observation: dict, state: Any = _NO_STATE) -> np.ndarray | tuple[np.ndarray, Any]:
+        """Return a MultiBinary action: int array of shape action_space.shape with values in {0, 1}.
+
+        Supports both standard DoomAgent.act(obs) and state-passing Agent.act(obs, h).
+        """
+        if state is not _NO_STATE and state is not None:
+            self.recurrent_state = state
+
         # 1. Preprocess sensory observation & update egocentric occupancy grid
-        inputs, self.odom_state = preprocess(
-            obs=observation,
-            state=self.odom_state,
-            device=self.device,
-            use_grid=True,
-        )
+        if "grid_flat" in observation:
+            # Simplified / flat observation bundle
+            rays_np = np.asarray(observation["rays"], dtype=np.float32)
+            if rays_np.ndim == 2:
+                rays_t = torch.from_numpy(rays_np).unsqueeze(0).to(self.device)
+            else:
+                rays_t = torch.from_numpy(rays_np).to(self.device)
+
+            vitals_np = np.asarray(observation.get("vitals", []), dtype=np.float32)
+            vitals_buf = np.zeros(36, dtype=np.float32)
+            vitals_buf[: min(len(vitals_np), 36)] = vitals_np[:36]
+            vitals_t = torch.from_numpy(vitals_buf).unsqueeze(0).to(self.device)
+
+            grid_flat = np.asarray(observation["grid_flat"], dtype=np.float32)
+            grid_buf = np.zeros((6, 32, 32), dtype=np.float32)
+            if len(grid_flat) == 1024:
+                grid_buf[0] = grid_flat.reshape(32, 32)
+            grid_t = torch.from_numpy(grid_buf).unsqueeze(0).to(self.device)
+
+            mask_np = np.asarray(observation.get("action_mask", np.ones(9)), dtype=np.float32)
+            mask_t = torch.from_numpy(mask_np > 0.5).unsqueeze(0).to(self.device)
+
+            d_theta_val = float(observation.get("d_theta", 0.0))
+            d_theta_t = torch.tensor([d_theta_val], dtype=torch.float32, device=self.device)
+
+            ent_feats = torch.zeros((1, 32, 5), dtype=torch.float32, device=self.device)
+            ent_types = torch.zeros((1, 32), dtype=torch.int64, device=self.device)
+            ent_mask = torch.zeros((1, 32), dtype=torch.bool, device=self.device)
+            rgb_depth = torch.zeros((1, 4, 48, 64), dtype=torch.float32, device=self.device)
+
+            from training.preprocessing import ModelInputs
+            inputs = ModelInputs(
+                rays=rays_t,
+                ent_feats=ent_feats,
+                ent_types=ent_types,
+                ent_mask=ent_mask,
+                vitals=vitals_t,
+                rgb_depth=rgb_depth,
+                grid=grid_t,
+                action_mask=mask_t,
+                d_theta=d_theta_t,
+            )
+        else:
+            inputs, self.odom_state = preprocess(
+                obs=observation,
+                state=self.odom_state,
+                device=self.device,
+                use_grid=True,
+            )
 
         # 2. Forward pass through HybridDoomNet
         logits, _, _, self.recurrent_state = self.model(
@@ -130,7 +186,14 @@ class DoomAgent:
         action = (action & act_mask.astype(np.int8)).astype(np.int8)
 
         # Update previous action tracker and door USE cooldown in odometry state
-        if self.odom_state is not None:
+        if self.odom_state is not None and "grid_flat" not in observation:
             self.odom_state = update_action_state(self.odom_state, action, observation)
 
+        if state is not _NO_STATE:
+            return action, self.recurrent_state
+
         return action
+
+
+Agent = DoomAgent
+__all__ = ["DoomAgent", "Agent"]

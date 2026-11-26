@@ -146,10 +146,45 @@ def score_episode(
     }
 
 
+def _specs_from_wad_dir(wad_dir_p: Path) -> list[EvalMapSpec]:
+    specs = []
+    for wad_file in sorted(wad_dir_p.glob("*.wad")):
+        stem = wad_file.stem
+        tier = 1
+        if "t1" in stem or "tier1" in stem:
+            tier = 1
+        elif "t2" in stem or "tier2" in stem:
+            tier = 2
+        elif "t3" in stem or "tier3" in stem:
+            tier = 3
+        elif "t4" in stem or "tier4" in stem:
+            tier = 4
+
+        seed = 1001
+        if "seed" in stem:
+            try:
+                seed = int("".join(filter(str.isdigit, stem.split("seed")[-1])))
+            except Exception:
+                pass
+        specs.append(
+            EvalMapSpec(
+                id=stem,
+                wad_path=str(wad_file),
+                map_name="MAP01",
+                tier=tier,
+                episode_ticks=4200 if tier == 4 else 2100,
+                seed=seed,
+            )
+        )
+    return specs
+
+
 def score_checkpoint(
     checkpoint_path: Path | str | None = None,
     eval_suite_path: Path | str | None = None,
     device: str = "cpu",
+    wad_dir: Path | str | None = None,
+    out_path: Path | str | None = None,
 ) -> dict:
     """Evaluates agent on the full held-out suite and generates scorecard JSON."""
     if device == "cpu":
@@ -171,7 +206,24 @@ def score_checkpoint(
             print(f"[Scorer] Loaded checkpoint: {p}")
 
     # Load map suite
-    if eval_suite_path is not None and Path(eval_suite_path).exists():
+    if wad_dir is not None and Path(wad_dir).is_dir():
+        wad_dir_p = Path(wad_dir)
+        default_suite_json = REPO_ROOT / "training" / "scorer" / "eval_suite.json"
+        if default_suite_json.exists():
+            all_specs = load_eval_suite_from_json(default_suite_json)
+            matched = [
+                s for s in all_specs
+                if Path(s.wad_path).name in {p.name for p in wad_dir_p.glob("*.wad")}
+            ]
+            if matched:
+                for s in matched:
+                    s.wad_path = str(wad_dir_p / Path(s.wad_path).name)
+                suite = matched
+            else:
+                suite = _specs_from_wad_dir(wad_dir_p)
+        else:
+            suite = _specs_from_wad_dir(wad_dir_p)
+    elif eval_suite_path is not None and Path(eval_suite_path).exists():
         suite = load_eval_suite_from_json(eval_suite_path)
     else:
         suite = get_default_eval_suite(REPO_ROOT)
@@ -217,24 +269,46 @@ def score_checkpoint(
         "mean_act_ms": round(mean_ms, 2),
         "p99_act_ms": round(p99_ms, 2),
         "passed_limits": mean_ms < AGENT_MS_PER_STEP,
+        "maps_evaluated": len(suite),
+        "results": [
+            {
+                "id": r["map_id"],
+                "tier": r["tier"],
+                "exit_reached": r["exit_reached"],
+                "score": r["weighted_score"],
+                "kills": r["kills"],
+                "mean_act_ms": r["mean_act_ms"],
+            }
+            for r in results
+        ],
     }
 
     print("\n--- Checkpoint Evaluation Summary ---")
-    print(json.dumps(summary, indent=2))
+    print(json.dumps({k: v for k, v in summary.items() if k != "results"}, indent=2))
+
+    if out_path:
+        out_p = Path(out_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_p, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        print(f"[Scorer] Saved evaluation results to {out_p.resolve()}")
+
     return summary
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate DoomAgent on held-out suite.")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Path to .pt checkpoint")
+    parser.add_argument("--checkpoint", type=str, default="submission/weights/best_agent.pt", help="Path to .pt checkpoint")
     parser.add_argument("--suite", type=str, default=None, help="Path to eval_suite.json")
+    parser.add_argument("--wad_dir", "--wad-dir", type=str, default=None, help="Path to heldout WAD directory")
+    parser.add_argument("--out", "-o", type=str, default=None, help="Path to output JSON scorecard")
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
-    parser.add_argument("--out", type=str, default=None, help="Optional JSON output file path")
     args = parser.parse_args()
 
-    res = score_checkpoint(args.checkpoint, args.suite, device=args.device)
-    if args.out:
-        out_p = Path(args.out)
-        out_p.parent.mkdir(parents=True, exist_ok=True)
-        out_p.write_text(json.dumps(res, indent=2), encoding="utf-8")
-        print(f"[Scorer] Saved JSON summary to: {out_p}")
+    score_checkpoint(
+        checkpoint_path=args.checkpoint,
+        eval_suite_path=args.suite,
+        device=args.device,
+        wad_dir=args.wad_dir,
+        out_path=args.out,
+    )
