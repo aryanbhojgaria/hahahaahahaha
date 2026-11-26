@@ -30,6 +30,12 @@ class RewardWeights:
     stuck_wall_scrape: float = -0.02
     wasted_shot: float = -0.015
     step_cost: float = -0.002
+    # Anti-loop / exploration shaping (training-only, relative displacement)
+    new_cell: float = 0.06
+    loop_penalty: float = -0.015
+    conflict_buttons: float = -0.01
+    backward_move: float = -0.004
+    forward_progress: float = 0.004
 
 
 def _point_in_segments(x: float, y: float, segs: np.ndarray) -> bool:
@@ -46,6 +52,96 @@ def _point_in_segments(x: float, y: float, segs: np.ndarray) -> bool:
     x_intersect = (x2[cond] - x1[cond]) * (y - y1[cond]) / (y2[cond] - y1[cond]) + x1[cond]
     crossings = int(np.sum(x < x_intersect))
     return (crossings % 2) == 1
+
+
+def _polygon_area_from_segments(segs: np.ndarray, aabb_area: float) -> float:
+    """Compute rotation-invariant polygon area via shoelace over traced boundary rings.
+
+    Falls back to `aabb_area` only when segments do not form closed polygon ring(s).
+    """
+    n_segs = len(segs)
+    if n_segs < 3:
+        return aabb_area
+
+    def _vkey(x: float, y: float) -> tuple[float, float]:
+        return (round(float(x), 6), round(float(y), 6))
+
+    adj: dict[tuple[float, float], list[tuple[tuple[float, float], int, tuple[float, float], tuple[float, float]]]] = {}
+    keys: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    for i in range(n_segs):
+        x1, y1, x2, y2 = float(segs[i, 0]), float(segs[i, 1]), float(segs[i, 2]), float(segs[i, 3])
+        u = _vkey(x1, y1)
+        v = _vkey(x2, y2)
+        keys.append((u, v))
+        if u == v:
+            continue
+        adj.setdefault(u, []).append((v, i, (x1, y1), (x2, y2)))
+        adj.setdefault(v, []).append((u, i, (x2, y2), (x1, y1)))
+
+    used = [False] * n_segs
+    rings: list[tuple[float, tuple[float, float], np.ndarray]] = []
+    all_closed = True
+
+    for i in range(n_segs):
+        if used[i]:
+            continue
+        u, v = keys[i]
+        used[i] = True
+        if u == v:
+            continue
+        p1 = (float(segs[i, 0]), float(segs[i, 1]))
+        p2 = (float(segs[i, 2]), float(segs[i, 3]))
+        pts: list[tuple[float, float]] = [p1, p2]
+        ring_segs: list[list[float]] = [[p1[0], p1[1], p2[0], p2[1]]]
+        cur = v
+        closed = False
+        while True:
+            if cur == u:
+                closed = True
+                break
+            nxt_edge = None
+            for cand in adj.get(cur, ()):
+                if not used[cand[1]]:
+                    nxt_edge = cand
+                    break
+            if nxt_edge is None:
+                break
+            nxt_k, j, p_cur, p_nxt = nxt_edge
+            used[j] = True
+            pts.append(p_nxt)
+            ring_segs.append([p_cur[0], p_cur[1], p_nxt[0], p_nxt[1]])
+            cur = nxt_k
+
+        if not closed or len(pts) < 4:
+            all_closed = False
+            break
+
+        arr = np.asarray(pts[:-1], dtype=np.float64)
+        cx = float(arr[:, 0].mean())
+        cy = float(arr[:, 1].mean())
+        rx = arr[:, 0] - cx
+        ry = arr[:, 1] - cy
+        ring_area = 0.5 * abs(float(np.sum(rx * np.roll(ry, -1) - np.roll(rx, -1) * ry)))
+        rings.append((ring_area, pts[0], np.asarray(ring_segs, dtype=np.float64)))
+
+    if not all_closed or not rings:
+        return aabb_area
+
+    if len(rings) == 1:
+        area = rings[0][0]
+        return max(1.0, area) if area > 1e-6 else aabb_area
+
+    max_idx = max(range(len(rings)), key=lambda idx: rings[idx][0])
+    outer_area, _, outer_segs = rings[max_idx]
+    total_area = outer_area
+    for idx, (r_area, sample_pt, _) in enumerate(rings):
+        if idx == max_idx:
+            continue
+        if _point_in_segments(sample_pt[0], sample_pt[1], outer_segs):
+            total_area -= r_area
+        else:
+            total_area += r_area
+    return max(1.0, total_area) if total_area > 1e-6 else aabb_area
 
 
 class RewardShaper:
@@ -67,6 +163,11 @@ class RewardShaper:
             self.w_stuck = float(weights.stuck_wall_scrape)
             self.w_wasted_shot = float(weights.wasted_shot)
             self.w_step = float(weights.step_cost)
+            self.w_cell = float(weights.new_cell)
+            self.w_loop = float(weights.loop_penalty)
+            self.w_conflict = float(weights.conflict_buttons)
+            self.w_back = float(weights.backward_move)
+            self.w_fwd = float(weights.forward_progress)
         else:
             w = dict(weights or {})
             self.w_exit = float(w.get("exit", 15.0))
@@ -83,6 +184,11 @@ class RewardShaper:
             self.w_stuck = float(w.get("stuck", -0.02))
             self.w_wasted_shot = float(w.get("wasted_shot", -0.015))
             self.w_step = float(w.get("step", -0.002))
+            self.w_cell = float(w.get("new_cell", 0.06))
+            self.w_loop = float(w.get("loop_penalty", -0.015))
+            self.w_conflict = float(w.get("conflict_buttons", -0.01))
+            self.w_back = float(w.get("backward_move", -0.004))
+            self.w_fwd = float(w.get("forward_progress", 0.004))
 
         self._sectors: list[tuple[int, float, float, float, float, np.ndarray, float]] = []
         self.visited_sectors: set[int] = set()
@@ -95,6 +201,8 @@ class RewardShaper:
         self._spawn_seeded: bool = False
         self._env_prev_priv: Optional[dict[str, Any]] = None
         self.last_components: dict[str, float] = {}
+        self._cells: set[tuple[int, int]] = set()
+        self._pos_hist: list[tuple[float, float]] = []
 
     @property
     def visited_sector_count(self) -> int:
@@ -122,7 +230,8 @@ class RewardShaper:
                 xmax = float(max(segs[:, 0].max(), segs[:, 2].max()))
                 ymin = float(min(segs[:, 1].min(), segs[:, 3].min()))
                 ymax = float(max(segs[:, 1].max(), segs[:, 3].max()))
-                area = max(1.0, (xmax - xmin) * (ymax - ymin))
+                aabb_area = max(1.0, (xmax - xmin) * (ymax - ymin))
+                area = _polygon_area_from_segments(segs, aabb_area)
                 weight = max(0.2, min(1.5, area / (512.0 * 512.0)))
                 self._sectors.append((int(sid), xmin, xmax, ymin, ymax, segs, weight))
 
@@ -136,6 +245,8 @@ class RewardShaper:
         self._spawn_seeded = False
         self._env_prev_priv = None
         self.last_components = {}
+        self._cells = set()
+        self._pos_hist = []
 
         if env_obj is not None:
             priv0 = env_obj.privileged_state()
@@ -147,7 +258,7 @@ class RewardShaper:
 
     def _find_sector(self, x: float, y: float) -> Optional[tuple[int, float]]:
         for sid, xmin, xmax, ymin, ymax, segs, weight in self._sectors:
-            if xmin <= x <= xmax and ymin <= y <= ymax:
+            if (xmin - 1e-9) <= x <= (xmax + 1e-9) and (ymin - 1e-9) <= y <= (ymax + 1e-9):
                 if _point_in_segments(x, y, segs):
                     return sid, weight
         return None
@@ -176,6 +287,11 @@ class RewardShaper:
             "death": 0.0,
             "stuck": 0.0,
             "step": self.w_step,
+            "explore": 0.0,
+            "loop": 0.0,
+            "conflict": 0.0,
+            "backward": 0.0,
+            "forward": 0.0,
         }
 
         # 1. Exit bonus (guarded once per episode)
@@ -278,6 +394,28 @@ class RewardShaper:
             self.stuck_steps = 0
         if self.stuck_steps > 8:
             comp["stuck"] = self.w_stuck
+
+        # 7. Anti-loop exploration shaping: reward new 80-unit cells, punish dithering in place
+        cell = (int(math.floor(x_now / 80.0)), int(math.floor(y_now / 80.0)))
+        if cell not in self._cells:
+            self._cells.add(cell)
+            if len(self._cells) > 1:
+                comp["explore"] = self.w_cell
+        self._pos_hist.append((x_now, y_now))
+        if len(self._pos_hist) > 40:
+            self._pos_hist.pop(0)
+        if len(self._pos_hist) == 40 and not bool(priv_now.get("finished", False)):
+            ox, oy = self._pos_hist[0]
+            if math.hypot(x_now - ox, y_now - oy) < 48.0:
+                comp["loop"] = self.w_loop
+        if len(act) > 5:
+            n_conf = int(act[0] == 1 and act[1] == 1) + int(act[2] == 1 and act[3] == 1) + int(act[4] == 1 and act[5] == 1)
+            if n_conf:
+                comp["conflict"] = self.w_conflict * float(n_conf)
+            if int(act[1]) == 1 and int(act[0]) == 0:
+                comp["backward"] = self.w_back
+            if moving_fwd and int(act[1]) == 0 and disp >= 3.0:
+                comp["forward"] = self.w_fwd
 
         self.last_components = comp
         return float(sum(comp.values()))

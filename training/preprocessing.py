@@ -146,14 +146,19 @@ def _estimate_dtheta(
     num_visible_entities: int,
 ) -> float:
     """Estimate ego yaw change Δθ (radians, CCW positive) via 64-ray circular scan-matching."""
-    k_prior = int(round(float(prev_action[4]) - float(prev_action[5])))
-    prior_weight = 0.06 if num_visible_entities > 2 else 0.02
+    ray_dist = np.clip(np.nan_to_num(ray_dist, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    prev_ray_dist = np.clip(np.nan_to_num(prev_ray_dist, nan=1.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    prev_act = np.nan_to_num(prev_action, nan=0.0, posinf=0.0, neginf=0.0)
+
+    k_prior = int(round(float(prev_act[4]) - float(prev_act[5])))
+    prior_weight = 5e-5 if num_visible_entities > 2 else 2e-5
 
     # Filter out moving enemies (hit_type == 4) and max-range misses
     cur_static = (ray_dist < 0.98) & (ray_type != 4)
     prev_static = (prev_ray_dist < 0.98) & (prev_ray_type != 4)
 
     candidates = range(k_prior - 4, k_prior + 5)
+    mses: list[float] = []
     scores: list[float] = []
     valid_counts: list[int] = []
 
@@ -167,8 +172,10 @@ def _estimate_dtheta(
         if n_valid >= 4:
             diff = ray_dist[joint] - shifted_dist[joint]
             mse = float(np.mean(diff * diff))
+            mses.append(mse)
             scores.append(mse + prior_weight * float((k - k_prior) ** 2))
         else:
+            mses.append(1e6)
             scores.append(1e6 + prior_weight * float((k - k_prior) ** 2))
 
     if max(valid_counts) < 4:
@@ -177,10 +184,10 @@ def _estimate_dtheta(
     best_idx = int(np.argmin(scores))
     best_k = (k_prior - 4) + best_idx
 
-    # 3-point parabolic refinement when interior minimum is valid
+    # 3-point parabolic refinement on pure scan-matching MSE when interior minimum is valid
     delta = 0.0
-    if 0 < best_idx < len(scores) - 1:
-        y_m, y_0, y_p = scores[best_idx - 1], scores[best_idx], scores[best_idx + 1]
+    if 0 < best_idx < len(mses) - 1:
+        y_m, y_0, y_p = mses[best_idx - 1], mses[best_idx], mses[best_idx + 1]
         if y_m < 1e5 and y_p < 1e5:
             denom = y_m - 2.0 * y_0 + y_p
             if denom > 1e-8:
@@ -200,13 +207,20 @@ def _update_egocentric_grid(
 ) -> np.ndarray:
     """Warp previous (6, 32, 32) grid by ego motion and splat current 64 ray endpoints."""
     # Decay existing grid slowly; keep visited (0) & locked_door (3) longer
-    grid = prev_grid.copy()
+    grid = np.nan_to_num(prev_grid, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32, copy=True)
     grid[0] *= 0.998
     grid[1] *= 0.992
     grid[2] *= 0.992
     grid[3] *= 0.998
     grid[4] *= 0.992
     grid[5] *= 0.992
+
+    if not math.isfinite(vel_forward):
+        vel_forward = 0.0
+    if not math.isfinite(vel_right):
+        vel_right = 0.0
+    if not math.isfinite(dtheta):
+        dtheta = 0.0
 
     dx_cells = (vel_forward * FRAME_SKIP) / CELL_SIZE
     dy_cells = (vel_right * FRAME_SKIP) / CELL_SIZE
@@ -258,8 +272,17 @@ def _update_egocentric_grid(
 
 def _pack_rgb_depth(obs: dict[str, Any]) -> np.ndarray:
     """Convert raw RGB (120x160x3 or 48x64x3) and Depth (120x160 or 48x64) to (4, 48, 64) float32."""
-    rgb = np.asarray(obs["rgb"], dtype=np.uint8)
-    depth = np.asarray(obs["depth"], dtype=np.uint8)
+    rgb_raw = np.asarray(obs["rgb"])
+    if np.issubdtype(rgb_raw.dtype, np.floating):
+        rgb = np.clip(np.nan_to_num(rgb_raw, nan=0.0, posinf=255.0, neginf=0.0), 0.0, 255.0).astype(np.uint8)
+    else:
+        rgb = rgb_raw.astype(np.uint8, copy=False)
+
+    depth_raw = np.asarray(obs["depth"])
+    if np.issubdtype(depth_raw.dtype, np.floating):
+        depth = np.clip(np.nan_to_num(depth_raw, nan=0.0, posinf=255.0, neginf=0.0), 0.0, 255.0).astype(np.uint8)
+    else:
+        depth = depth_raw.astype(np.uint8, copy=False)
     if depth.ndim == 3 and depth.shape[-1] == 1:
         depth = depth[..., 0]
 
@@ -271,7 +294,7 @@ def _pack_rgb_depth(obs: dict[str, Any]) -> np.ndarray:
     out = np.empty((4, RGB_HEIGHT, RGB_WIDTH), dtype=np.float32)
     out[:3] = np.transpose(rgb, (2, 0, 1)).astype(np.float32) * (1.0 / 255.0)
     out[3] = depth.astype(np.float32) * (1.0 / 255.0)
-    return out
+    return np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
 
 
 def _validate_obs_contract(obs: dict[str, Any]) -> None:
@@ -321,7 +344,12 @@ def compute_action_mask(obs: dict[str, Any], state: OdomGridState) -> np.ndarray
     mask = np.ones((NUM_ACTIONS,), dtype=bool)
     if int(state.use_cooldown) > 0:
         mask[7] = False
-    v = np.asarray(obs.get("vitals", np.zeros(NUM_VITALS_RAW, dtype=np.float32)), dtype=np.float32)
+    v = np.nan_to_num(
+        np.asarray(obs.get("vitals", np.zeros(NUM_VITALS_RAW, dtype=np.float32)), dtype=np.float32),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     if len(v) >= 4:
         selected_weapon = int(round(float(v[2])))
         selected_ammo = float(v[3])
@@ -348,8 +376,15 @@ def preprocess(
         cur_state = state
 
     # --- 1. Rays (1, 8, 64) ---
-    ray_dist = np.clip(np.asarray(obs["rays"]["distance"], dtype=np.float32), 0.0, 1.0)
-    ray_type = np.clip(np.asarray(obs["rays"]["hit_type"], dtype=np.int64), 0, 5)
+    raw_ray_dist = np.nan_to_num(
+        np.asarray(obs["rays"]["distance"], dtype=np.float32),
+        nan=1.0,
+        posinf=1.0,
+        neginf=0.0,
+    )
+    ray_dist = np.clip(raw_ray_dist, 0.0, 1.0)
+    raw_ray_type = np.nan_to_num(np.asarray(obs["rays"]["hit_type"]), nan=0.0).astype(np.int64)
+    ray_type = np.clip(raw_ray_type, 0, 5)
     rays_arr = np.zeros((8, NUM_RAYS), dtype=np.float32)
     rays_arr[0] = ray_dist
     rays_arr[1] = 1.0 - ray_dist
@@ -358,8 +393,13 @@ def preprocess(
     # --- 2. Visible Entities (1, 32, 5), (1, 32), (1, 32) ---
     ve = obs["visible_entities"]
     raw_mask = np.asarray(ve["mask"]).astype(bool)
-    raw_feats = np.asarray(ve["features"], dtype=np.float32).copy()
-    raw_types = np.clip(np.asarray(ve["entity_type"], dtype=np.int64), 0, 11).copy()
+    raw_feats = np.nan_to_num(
+        np.asarray(ve["features"], dtype=np.float32),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).copy()
+    raw_types = np.clip(np.nan_to_num(np.asarray(ve["entity_type"]), nan=0.0).astype(np.int64), 0, 11).copy()
 
     # sensors.py:295 emits raw rel_vel_fwd, rel_vel_right in map units/tic; normalize by 30.0
     raw_feats[:, 3:5] *= 1.0 / 30.0
@@ -367,7 +407,7 @@ def preprocess(
     raw_types[~raw_mask] = 0
 
     # --- 3. Vitals + Action Context (1, 36) ---
-    v = np.asarray(obs["vitals"], dtype=np.float32)
+    v = np.nan_to_num(np.asarray(obs["vitals"], dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
     vitals_arr = np.zeros((NUM_VITALS_PREPROCESSED,), dtype=np.float32)
     vitals_arr[0] = np.clip(v[0] / 100.0, 0.0, 2.0)  # health
     vitals_arr[1] = np.clip(v[1] / 100.0, 0.0, 2.0)  # armor
@@ -380,7 +420,12 @@ def preprocess(
     weapon_idx = max(0, min(7, selected_weapon))
     vitals_arr[16 + weapon_idx] = 1.0
 
-    prev_act = np.asarray(cur_state.prev_action, dtype=np.float32).reshape(NUM_ACTIONS)
+    prev_act = np.nan_to_num(
+        np.asarray(cur_state.prev_action, dtype=np.float32).reshape(NUM_ACTIONS),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     use_pressed = int(round(float(prev_act[7]))) == 1
     current_cooldown = max(0, int(cur_state.use_cooldown))
     next_use_consumed = bool(cur_state.use_consumed)
@@ -472,20 +517,29 @@ def update_action_state(
     obs: Optional[dict[str, Any]] = None,
 ) -> OdomGridState:
     """Update state with executed `action` and trigger 6-step USE cooldown if facing a door."""
-    act = np.asarray(action, dtype=np.float32).reshape(NUM_ACTIONS)
+    act = np.nan_to_num(
+        np.asarray(action, dtype=np.float32).reshape(NUM_ACTIONS),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     next_state = state.copy()
     next_state.prev_action = act.copy()
 
     if int(round(float(act[7]))) == 1:
-        next_state.use_consumed = True
-        if obs is not None:
-            r_dist = np.asarray(obs["rays"]["distance"], dtype=np.float32)
-            r_type = np.asarray(obs["rays"]["hit_type"], dtype=np.int64)
+        if obs is not None and next_state.use_cooldown == 0 and not state.use_consumed:
+            r_dist = np.clip(
+                np.nan_to_num(np.asarray(obs["rays"]["distance"], dtype=np.float32), nan=1.0, posinf=1.0, neginf=0.0),
+                0.0,
+                1.0,
+            )
+            r_type = np.nan_to_num(np.asarray(obs["rays"]["hit_type"]), nan=0.0).astype(np.int64)
             idx = np.asarray(FRONT_RAY_INDICES, dtype=np.int64)
-            front_door = np.any(((r_type[idx] == 2) | (r_type[idx] == 3)) & (r_dist[idx] < 0.15))
+            front_door = bool(np.any(((r_type[idx] == 2) | (r_type[idx] == 3)) & (r_dist[idx] < 0.15)))
             if front_door:
                 next_state.use_cooldown = 6
                 next_state.cooldown_pre_armed = True
+                next_state.use_consumed = True
     else:
         next_state.use_consumed = False
 

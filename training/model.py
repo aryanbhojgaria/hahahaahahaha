@@ -105,10 +105,15 @@ class EntitySetEncoder(nn.Module):
     ) -> torch.Tensor:
         # ent_mask: (B, 32) bool
         has_any = ent_mask.any(dim=-1)  # (B,)
-        mask_f = ent_mask.unsqueeze(-1).to(dtype=ent_feats.dtype)
+        mask_3d = ent_mask.unsqueeze(-1)
+        mask_f = mask_3d.to(dtype=ent_feats.dtype)
 
+        safe_feats = torch.nan_to_num(ent_feats, nan=0.0, posinf=0.0, neginf=0.0)
+        safe_feats = torch.where(mask_3d, safe_feats, torch.zeros_like(safe_feats))
         emb = self.type_emb(ent_types.clamp(0, self.type_emb.num_embeddings - 1))
-        x = self.in_proj(torch.cat([emb, ent_feats], dim=-1)) * mask_f
+        raw_x = torch.cat([emb, safe_feats], dim=-1)
+        raw_x = torch.where(mask_3d, raw_x, torch.zeros_like(raw_x))
+        x = self.in_proj(raw_x) * mask_f
 
         # Ensure at least slot 0 is unmasked for empty rows so softmax never divides by 0 -> NaN
         safe_mask = ent_mask.clone()
@@ -206,7 +211,7 @@ def _as_tensor_dict(
         elif key in ("ent_mask", "action_mask"):
             t = t.to(dtype=torch.bool)
         else:
-            t = t.to(dtype=torch.float32)
+            t = torch.nan_to_num(t.to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
         out[key] = t
     return out
 
@@ -333,8 +338,9 @@ class HybridDoomNet(nn.Module):
     def _rotate_slots(self, slots: torch.Tensor, d_theta: Optional[torch.Tensor]) -> torch.Tensor:
         if d_theta is None or self.slot_dim < 2:
             return slots
-        cos_dt = torch.cos(-d_theta).view(-1, 1)
-        sin_dt = torch.sin(-d_theta).view(-1, 1)
+        safe_dt = torch.nan_to_num(d_theta, nan=0.0, posinf=0.0, neginf=0.0)
+        cos_dt = torch.cos(safe_dt).view(-1, 1)
+        sin_dt = torch.sin(safe_dt).view(-1, 1)
         s0 = slots[:, :, 0]
         s1 = slots[:, :, 1]
         r0 = s0 * cos_dt + s1 * sin_dt

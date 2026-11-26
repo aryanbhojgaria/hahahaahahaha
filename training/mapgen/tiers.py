@@ -15,6 +15,7 @@ and walkover exit alcoves with:
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import shutil
@@ -762,7 +763,11 @@ class MapGen:
 
         target_dir = Path(out_dir) if out_dir is not None else Path(k.get("out_dir", "tmp_wads"))
         target_dir.mkdir(parents=True, exist_ok=True)
-        tag = f"t{tier}_{scenario}_s{int(seed)}_a{int(round(alpha * 100))}_p{os.getpid()}"
+        knobs_for_hash = {str(key): val for key, val in k.items() if key != "out_dir"}
+        knobs_hash = hashlib.sha1(
+            json.dumps(knobs_for_hash, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:8]
+        tag = f"t{tier}_{scenario}_s{int(seed)}_a{int(round(alpha * 100))}_k{knobs_hash}_p{os.getpid()}"
         raw_wad = target_dir / f"{tag}_raw.wad"
         final_wad = target_dir / f"{tag}.wad"
 

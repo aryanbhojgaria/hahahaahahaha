@@ -20,6 +20,7 @@ from training.model import HybridDoomNet, RecurrentState
 from training.preprocessing import (
     ModelInputs,
     OdomGridState,
+    _estimate_dtheta,
     preprocess,
     stack_model_inputs,
     update_action_state,
@@ -557,3 +558,196 @@ def test_m2_end_to_end_pipeline_zero_nans(tmp_path):
         plr.update_score(lvl["level_id"], abs(total_shaped), update_idx=1)
     finally:
         env.close()
+
+
+# --------------------------------------------------------------------------- 8. Iteration-2 Regression Tests
+def test_rotate_slots_negative_dtheta_sign():
+    net = HybridDoomNet()
+    slots = torch.zeros((1, 4, 8), dtype=torch.float32)
+    slots[:, :, 0] = 1.0
+    slots[:, :, 1] = 0.0
+    slots[:, :, 2] = 0.5
+    rotated = net._rotate_slots(slots, torch.tensor([math.pi / 2.0], dtype=torch.float32))
+    torch.testing.assert_close(rotated[:, :, 0], torch.zeros((1, 4)), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(rotated[:, :, 1], -torch.ones((1, 4)), atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(rotated[:, :, 2], torch.full((1, 4), 0.5), atol=1e-5, rtol=1e-5)
+
+
+def test_estimate_dtheta_three_bin_and_one_bin_shifts():
+    angles = np.arange(64, dtype=np.float32) * (2.0 * np.pi / 64.0)
+    base_dist = (0.45 + 0.30 * np.sin(2.0 * angles) + 0.12 * np.cos(5.0 * angles)).astype(np.float32)
+    ones = np.ones(64, dtype=np.int64)
+    no_hint = np.zeros(9, dtype=np.float32)
+    turn_left = np.array([0, 0, 0, 0, 1, 0, 0, 0, 0], dtype=np.float32)
+
+    for k in (1, -1, 3, -3):
+        curr_dist = np.roll(base_dist, -k)
+        expected = float(k) * (2.0 * math.pi / 64.0)
+        for n_ent in (0, 3):
+            est_nohint = _estimate_dtheta(curr_dist, ones, base_dist, ones, no_hint, n_ent)
+            assert abs(est_nohint - expected) < 0.02, f"nohint k={k} n={n_ent}: got {est_nohint} vs {expected}"
+        if k > 0:
+            est_hint = _estimate_dtheta(curr_dist, ones, base_dist, ones, turn_left, 3)
+            assert abs(est_hint - expected) < 0.02, f"hint k={k}: got {est_hint} vs {expected}"
+
+
+def test_nan_inf_resilience_preprocess_and_model():
+    # 1. preprocess active & masked NaN/Inf resilience
+    obs = _synthetic_obs(48, 64, weapon=2, ammo=10)
+    obs["rays"]["distance"][0] = np.nan
+    obs["rays"]["distance"][1] = np.inf
+    obs["vitals"][0] = np.nan
+    obs["vitals"][14] = -np.inf
+    obs["visible_entities"]["mask"][0] = 1
+    obs["visible_entities"]["features"][0] = [np.nan, np.inf, -np.inf, 1.0, np.nan]
+    obs["visible_entities"]["mask"][1] = 0
+    obs["visible_entities"]["features"][1] = [np.nan, np.nan, np.nan, np.nan, np.nan]
+
+    inp, st = preprocess(obs, None)
+    assert torch.isfinite(inp.rays).all()
+    assert torch.isfinite(inp.ent_feats).all()
+    assert torch.isfinite(inp.vitals).all()
+    assert torch.isfinite(inp.rgb_depth).all()
+    assert torch.isfinite(inp.grid).all()
+    assert inp.d_theta is not None and torch.isfinite(inp.d_theta).all()
+    assert np.isfinite(st.grid).all() and np.isfinite(st.prev_ray_dist).all()
+
+    # 2. HybridDoomNet masked and active NaN/Inf forward + backward
+    net = HybridDoomNet()
+    net.train()
+    clean_inp, _ = preprocess(_synthetic_obs(48, 64), None)
+
+    # Masked entity NaN (IEEE-754 NaN * 0.0 hazard)
+    d_masked = {k: v.clone() for k, v in clean_inp.as_dict().items()}
+    d_masked["ent_mask"].zero_()
+    d_masked["ent_feats"].fill_(float("nan"))
+    h0 = net.init_state(1)
+    logits_m, val_m, aux_m, nh_m = net(d_masked, h0, return_aux=True)
+    assert torch.isfinite(logits_m).all()
+    assert torch.isfinite(val_m).all()
+    assert torch.isfinite(aux_m["value_compass"]).all()
+    assert torch.isfinite(nh_m.gru_h).all() and torch.isfinite(nh_m.obj_slots).all()
+
+    # Active NaN/Inf across all tensor modalities
+    d_active = {k: v.clone() for k, v in clean_inp.as_dict().items()}
+    d_active["ent_mask"][0, 0] = True
+    d_active["ent_feats"][0, 0, :] = float("nan")
+    d_active["rays"][0, 0, 0] = float("nan")
+    d_active["vitals"][0, 0] = float("nan")
+    d_active["rgb_depth"][0, 0, 0, 0] = float("inf")
+    d_active["grid"][0, 0, 0, 0] = float("-inf")
+    d_active["d_theta"] = torch.tensor([float("nan")], dtype=torch.float32)
+
+    net.zero_grad()
+    logits_a, val_a, aux_a, nh_a = net(d_active, h0, return_aux=True)
+    assert torch.isfinite(logits_a).all()
+    assert torch.isfinite(val_a).all()
+    assert torch.isfinite(aux_a["value_compass"]).all()
+    loss = (
+        logits_a.sigmoid().sum()
+        + val_a.pow(2).sum()
+        + aux_a["value_compass"].pow(2).sum()
+        + aux_a["next_rays"].sum()
+        + aux_a["door_prox"].pow(2).sum()
+        + aux_a["key_prox"].pow(2).sum()
+        + aux_a["exit_prox"].pow(2).sum()
+    )
+    loss.backward()
+    for name, param in net.named_parameters():
+        assert param.grad is not None, f"missing grad for {name}"
+        assert torch.isfinite(param.grad).all(), f"non-finite grad in {name}"
+
+
+def test_mapgen_distinct_filenames_for_distinct_knobs(tmp_path):
+    wad1, _ = MapGen.sample(
+        tier=1,
+        knobs={"scenario": "open_arena", "num_rooms": 1, "origin_x": 0, "origin_y": 0, "out_dir": str(tmp_path)},
+        seed=404040,
+        scaffolding_alpha=0.0,
+    )
+    bytes1 = wad1.read_bytes()
+    wad2, _ = MapGen.sample(
+        tier=1,
+        knobs={"scenario": "open_arena", "num_rooms": 3, "origin_x": 1024, "origin_y": -1024, "out_dir": str(tmp_path)},
+        seed=404040,
+        scaffolding_alpha=0.0,
+    )
+    assert wad1 != wad2
+    assert wad1.read_bytes() == bytes1
+    assert wad2.is_file()
+
+
+def test_reward_shaper_45deg_rotation_invariance():
+    def _rot45(x: float, y: float) -> tuple[float, float]:
+        c = math.cos(math.pi / 4.0)
+        s = math.sin(math.pi / 4.0)
+        return (x * c - y * s, x * s + y * c)
+
+    # Unordered 400x100 sectors
+    polys_base = [
+        (0, np.array([[0, 0, 0, 100], [400, 100, 0, 100], [400, 0, 400, 100], [0, 0, 400, 0]], np.float64)),
+        (1, np.array([[400, 0, 400, 100], [400, 100, 800, 100], [800, 100, 800, 0], [800, 0, 400, 0]], np.float64)),
+    ]
+    polys_rot = []
+    for sid, segs in polys_base:
+        rsegs = np.empty_like(segs)
+        for i in range(len(segs)):
+            x1, y1 = _rot45(segs[i, 0], segs[i, 1])
+            x2, y2 = _rot45(segs[i, 2], segs[i, 3])
+            rsegs[i] = [x1, y1, x2, y2]
+        polys_rot.append((sid, rsegs))
+
+    sh_base = RewardShaper()
+    sh_rot = RewardShaper()
+    sh_base.reset(polys_base)
+    sh_rot.reset(polys_rot)
+
+    priv_prev = {
+        "tic": 4, "episode_ticks": 2100, "x": 200.0, "y": 50.0, "angle": 0.0,
+        "kills": 0, "items": 0, "damage_taken": 0.0, "keys": np.zeros(6, np.float32),
+        "dead": False, "exit_reached": False,
+    }
+    priv_now = {
+        "tic": 8, "episode_ticks": 2100, "x": 600.0, "y": 50.0, "angle": 0.0,
+        "kills": 1, "items": 0, "damage_taken": 0.0, "keys": np.zeros(6, np.float32),
+        "dead": False, "exit_reached": True,
+    }
+    px0, py0 = _rot45(priv_prev["x"], priv_prev["y"])
+    px1, py1 = _rot45(priv_now["x"], priv_now["y"])
+    priv_prev_rot = {**priv_prev, "x": px0, "y": py0, "angle": 45.0}
+    priv_now_rot = {**priv_now, "x": px1, "y": py1, "angle": 45.0}
+
+    act = np.array([1, 0, 0, 0, 0, 0, 0, 0, 0], dtype=np.int8)
+    r_base = sh_base.step(priv_prev, priv_now, act, {"exit_reached": True})
+    r_rot = sh_rot.step(priv_prev_rot, priv_now_rot, act, {"exit_reached": True})
+    assert abs(r_rot - r_base) < 1e-6
+
+    c_base = attribute_sector_rewards(priv_prev, priv_now, sh_base.last_components)
+    c_rot = attribute_sector_rewards(priv_prev_rot, priv_now_rot, sh_rot.last_components)
+    np.testing.assert_allclose(c_base, c_rot, atol=1e-6)
+
+
+def test_update_action_state_cooldown_edge_cases():
+    obs_door = _synthetic_obs(48, 64, weapon=2, ammo=10)
+    obs_door["rays"]["hit_type"][0] = RAY_DOOR
+    obs_door["rays"]["distance"][0] = 0.08
+    use_act = np.array([0, 0, 0, 0, 0, 0, 0, 1, 0], dtype=np.int8)
+
+    # Path C: Repeated update_action_state(USE=1) while masked must NOT reset cooldown indefinitely
+    _, st = preprocess(obs_door, None)
+    cds = []
+    masks = []
+    for _ in range(10):
+        st = update_action_state(st, use_act, obs_door)
+        inp, st = preprocess(obs_door, st)
+        cds.append(st.use_cooldown)
+        masks.append(bool(inp.action_mask[0, 7]))
+    assert cds == [6, 5, 4, 3, 2, 1, 0, 0, 0, 0]
+    assert masks == [False] * 6 + [True] * 4
+
+    # Path D: update_action_state(..., obs=None) must not suppress subsequent preprocess(obs_door, st)
+    _, st_none = preprocess(obs_door, None)
+    st_none = update_action_state(st_none, use_act, obs=None)
+    inp_d, st_d = preprocess(obs_door, st_none)
+    assert bool(inp_d.action_mask[0, 7]) is False
+    assert st_d.use_cooldown == 6
