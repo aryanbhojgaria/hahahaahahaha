@@ -27,8 +27,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from doom_env import make_env
-from doom_env.limits import AGENT_MS_PER_STEP, ACT_SUBSEQUENT_TIMEOUT_S
+from doom_env.limits import AGENT_MS_PER_STEP, ACT_TIMEOUT_S
 from submission.agent import DoomAgent
+from training.rewards import RewardShaper
 from training.scorer.eval_suite import get_default_eval_suite, load_eval_suite_from_json, EvalMapSpec, TIER_WEIGHTS
 
 
@@ -38,8 +39,11 @@ def score_episode(
     device: str = "cpu",
 ) -> dict:
     """Evaluates agent on one map and computes partial-progress scorecard."""
+    wad_path = Path(spec.wad_path)
+    if not wad_path.is_file():
+        wad_path = REPO_ROOT / spec.wad_path
     env = make_env(
-        wad=spec.wad_path,
+        wad=str(wad_path),
         map_name=spec.map_name,
         episode_ticks=spec.episode_ticks,
         render_buffers=True,
@@ -49,15 +53,16 @@ def score_episode(
     obs, info = env.reset(seed=spec.seed)
 
     act_times = []
-    visited_sectors = set()
     keys_observed = 0
-    doors_opened = 0
-    locks_unlocked = 0
     damage_taken = 0.0
     kills = 0
 
-    priv_initial = env.privileged_state()
-    total_sectors = max(len(env.sector_polygons()), 1)
+    sector_polys = env.sector_polygons()
+    shaper = RewardShaper()
+    shaper.reset(sector_polys)
+    priv_prev = env.privileged_state()
+    priv = priv_prev
+    total_sectors = max(len(sector_polys), 1)
 
     step_idx = 0
     terminated = False
@@ -74,6 +79,9 @@ def score_episode(
 
         # Read privileged state in the scorer process for metric tracking
         priv = env.privileged_state()
+        shaper.step(priv_prev, priv, action, info)
+        priv_prev = priv
+
         if "keys" in priv:
             k_val = priv["keys"]
             keys_count = sum(k_val.values()) if isinstance(k_val, dict) else int(np.sum(k_val))
@@ -82,6 +90,10 @@ def score_episode(
             damage_taken = float(priv["damage_taken"])
         if "kills" in priv:
             kills = int(priv["kills"])
+
+    visited_sectors = shaper.visited_sectors
+    doors_opened = len(shaper.opened_doors)
+    locks_unlocked = len(shaper.unlocked_doors)
 
     env.close()
 
@@ -130,7 +142,7 @@ def score_episode(
         "exploration_frac": exploration_frac,
         "mean_act_ms": mean_ms,
         "p99_act_ms": p99_ms,
-        "passed_limits": (mean_ms <= AGENT_MS_PER_STEP) and (p99_ms <= ACT_SUBSEQUENT_TIMEOUT_S * 1000.0),
+        "passed_limits": (mean_ms <= AGENT_MS_PER_STEP) and (p99_ms <= ACT_TIMEOUT_S * 1000.0),
     }
 
 
@@ -217,6 +229,12 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to .pt checkpoint")
     parser.add_argument("--suite", type=str, default=None, help="Path to eval_suite.json")
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--out", type=str, default=None, help="Optional JSON output file path")
     args = parser.parse_args()
 
-    score_checkpoint(args.checkpoint, args.suite, device=args.device)
+    res = score_checkpoint(args.checkpoint, args.suite, device=args.device)
+    if args.out:
+        out_p = Path(args.out)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(json.dumps(res, indent=2), encoding="utf-8")
+        print(f"[Scorer] Saved JSON summary to: {out_p}")

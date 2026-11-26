@@ -11,7 +11,10 @@ Written from scratch in PyTorch per `planning/Design.md` and `planning/Schema.md
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -24,6 +27,7 @@ import yaml
 from doom_env import CONTRACT_VERSION
 from training.curriculum_plr import PLRBuffer
 from training.envs import VecDoomEnv
+from training.llm_coach import advise_curriculum
 from training.mapgen.tiers import MapGen
 from training.model import HybridDoomNet, RecurrentState
 from training.preprocessing import ModelInputs, OdomGridState, preprocess, update_action_state
@@ -165,9 +169,10 @@ def save_checkpoint(
     scorer_summary: Optional[dict[str, Any]] = None,
     obs_norm_stats: Optional[dict[str, Any]] = None,
 ) -> Path:
-    """Save a Schema.md §4 compliant `.pt` checkpoint."""
+    """Save a Schema.md §4 compliant `.pt` checkpoint atomically."""
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(f".pt.tmp.{os.getpid()}")
     payload = {
         "contract_version": str(CONTRACT_VERSION),
         "git_sha": _current_git_sha(),
@@ -180,7 +185,8 @@ def save_checkpoint(
             scorer_summary or {"total_score": 0.0, "mean_act_ms": 0.0, "p99_act_ms": 0.0}
         ),
     }
-    torch.save(payload, out_path)
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, out_path)
     return out_path
 
 
@@ -251,6 +257,8 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     max_grad_norm = float(cfg.get("max_grad_norm", 0.5))
     vf_coef = float(cfg.get("vf_coef", 0.5))
     ent_coef = float(cfg.get("ent_coef", 0.01))
+    ent_coef_start = float(cfg.get("ent_coef_start", ent_coef))
+    ent_coef_end = float(cfg.get("ent_coef_end", ent_coef))
     rnd_coef = float(cfg.get("rnd_coef", 0.05))
     grid_novelty_coef = float(cfg.get("grid_novelty_coef", 0.03))
     aux_coef = float(cfg.get("aux_coef", 0.10))
@@ -258,13 +266,23 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     bc_kl_beta_init = float(cfg.get("bc_kl_beta_init", 0.0))
     bc_kl_decay_steps = max(1, int(cfg.get("bc_kl_decay_steps", 4_000_000)))
     rgb_dropout_p = float(cfg.get("rgb_dropout_p", 0.25))
-    total_updates = int(cfg.get("total_updates", 10))
-    save_interval = max(1, int(cfg.get("save_interval", max(1, total_updates))))
+    steps_per_update = num_envs * rollout_steps
+    if cfg.get("max_steps") is not None:
+        total_updates = max(1, int(np.ceil(int(cfg["max_steps"]) / float(steps_per_update))))
+    else:
+        total_updates = int(cfg.get("total_updates", 10))
+    save_interval = max(1, int(cfg.get("save_interval", max(1, min(25, total_updates)))))
+    latest_interval = max(1, int(cfg.get("latest_interval", 2)))
+    log_interval = max(1, int(cfg.get("log_interval", 1)))
+    use_llm_coach = bool(cfg.get("use_llm_coach", False))
+    coach_interval = max(1, int(cfg.get("coach_interval", 25)))
     episode_ticks = int(cfg.get("episode_ticks", 2100))
 
     output_dir = Path(cfg.get("output_dir", "runs/ppo_default"))
     ckpt_dir = output_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_out_raw = cfg.get("best_out")
+    best_out_path = Path(best_out_raw) if best_out_raw else None
 
     model_cfg = dict(
         cfg.get(
@@ -363,7 +381,13 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
 
     last_loss = 0.0
     last_mean_return = 0.0
+    best_mean_return = -float("inf")
     last_ckpt_path: Optional[Path] = None
+    best_ckpt_path: Optional[Path] = None
+    rolling_returns: deque[float] = deque(maxlen=100)
+    rolling_exits: deque[float] = deque(maxlen=100)
+    rolling_kills: deque[float] = deque(maxlen=100)
+    train_t0 = time.perf_counter()
 
     try:
         obs_list, info_list = venv.reset()
@@ -374,6 +398,7 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
         num_chunks_per_env = rollout_steps // bptt_len
 
         for upd in range(start_update + 1, start_update + total_updates + 1):
+            upd_t0 = time.perf_counter()
             model.eval()
 
             buf_inputs: list[ModelInputs] = []
@@ -390,6 +415,8 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
 
             ep_returns = np.zeros(num_envs, dtype=np.float32)
             completed_returns: list[float] = []
+            completed_exits: list[float] = []
+            completed_kills: list[float] = []
 
             for step in range(rollout_steps):
                 if step % bptt_len == 0:
@@ -451,13 +478,20 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                         )
                     ep_returns[i] += float(extr_rew[i])
                     if done_np[i]:
-                        completed_returns.append(float(ep_returns[i]))
+                        ep_ret_val = float(ep_returns[i])
+                        completed_returns.append(ep_ret_val)
+                        completed_exits.append(1.0 if next_info[i].get("exit_reached", False) else 0.0)
+                        k_val = float(p_now.get("kills", 0)) if isinstance(p_now, dict) else 0.0
+                        completed_kills.append(k_val)
+                        rolling_returns.append(ep_ret_val)
+                        rolling_exits.append(completed_exits[-1])
+                        rolling_kills.append(k_val)
                         ep_returns[i] = 0.0
                         odom_states[i] = None
                         if not fixed_wad:
                             old_lvl = env_levels[i]
                             if old_lvl is not None:
-                                plr.update_score(old_lvl["level_id"], float(abs(extr_rew[i])) + 0.5, upd)
+                                plr.update_score(old_lvl["level_id"], abs(ep_ret_val) + 0.5, upd)
                             new_lvl = plr.sample_level(global_step=global_step, update_idx=upd)
                             knobs = {**new_lvl["knobs"], "out_dir": str(wads_dir)}
                             w_path, _ = MapGen.sample(
@@ -517,51 +551,38 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
             )
             adv_norm = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
-            # Build (total_chunks, bptt_len, ...) dataset
+            # Vectorized chunk flattening: (rollout_steps, num_envs, ...) -> (total_chunks, bptt_len, ...)
             total_chunks = num_chunks_per_env * num_envs
-            chunk_inputs: list[list[ModelInputs]] = []
-            chunk_dones_list: list[torch.Tensor] = []
-            chunk_actions_list: list[torch.Tensor] = []
-            chunk_old_lp_list: list[torch.Tensor] = []
-            chunk_adv_list: list[torch.Tensor] = []
-            chunk_ret_list: list[torch.Tensor] = []
-            chunk_next_rays_list: list[torch.Tensor] = []
-            chunk_compass_list: list[torch.Tensor] = []
-            chunk_gru_list: list[torch.Tensor] = []
-            chunk_slots_list: list[torch.Tensor] = []
 
-            for c in range(num_chunks_per_env):
-                t0 = c * bptt_len
-                t1 = t0 + bptt_len
-                for env_i in range(num_envs):
-                    seq_i = [
-                        ModelInputs(
-                            rays=buf_inputs[t].rays[env_i : env_i + 1],
-                            ent_feats=buf_inputs[t].ent_feats[env_i : env_i + 1],
-                            ent_types=buf_inputs[t].ent_types[env_i : env_i + 1],
-                            ent_mask=buf_inputs[t].ent_mask[env_i : env_i + 1],
-                            vitals=buf_inputs[t].vitals[env_i : env_i + 1],
-                            rgb_depth=buf_inputs[t].rgb_depth[env_i : env_i + 1],
-                            grid=buf_inputs[t].grid[env_i : env_i + 1],
-                            action_mask=buf_inputs[t].action_mask[env_i : env_i + 1],
-                            d_theta=(
-                                buf_inputs[t].d_theta[env_i : env_i + 1]
-                                if buf_inputs[t].d_theta is not None
-                                else None
-                            ),
-                        )
-                        for t in range(t0, t1)
-                    ]
-                    chunk_inputs.append(seq_i)
-                    chunk_dones_list.append(buf_dones[t0:t1, env_i])
-                    chunk_actions_list.append(buf_actions[t0:t1, env_i])
-                    chunk_old_lp_list.append(buf_log_probs[t0:t1, env_i])
-                    chunk_adv_list.append(adv_norm[t0:t1, env_i])
-                    chunk_ret_list.append(returns[t0:t1, env_i])
-                    chunk_next_rays_list.append(buf_next_rays[t0:t1, env_i])
-                    chunk_compass_list.append(buf_compass_tgt[t0:t1, env_i])
-                    chunk_gru_list.append(chunk_init_gru[c][:, env_i : env_i + 1, :])
-                    chunk_slots_list.append(chunk_init_slots[c][env_i : env_i + 1])
+            def _to_chunks(t_tb: torch.Tensor) -> torch.Tensor:
+                # Reshape time dim into (num_chunks_per_env, bptt_len), swap env dim before bptt_len, flatten
+                rest = t_tb.shape[2:]
+                reshaped = t_tb.reshape(num_chunks_per_env, bptt_len, num_envs, *rest)
+                return reshaped.permute(0, 2, 1, *range(3, 3 + len(rest))).reshape(total_chunks, bptt_len, *rest).contiguous()
+
+            obs_keys = ("rays", "ent_feats", "ent_types", "ent_mask", "vitals", "rgb_depth", "grid", "action_mask")
+            chunk_obs: dict[str, torch.Tensor] = {
+                k: _to_chunks(torch.stack([getattr(bi, k) for bi in buf_inputs], dim=0))
+                for k in obs_keys
+            }
+            if buf_inputs[0].d_theta is not None:
+                chunk_obs["d_theta"] = _to_chunks(
+                    torch.stack([bi.d_theta for bi in buf_inputs if bi.d_theta is not None], dim=0)
+                )
+
+            chunk_dones = _to_chunks(buf_dones)
+            chunk_actions = _to_chunks(buf_actions)
+            chunk_old_lp = _to_chunks(buf_log_probs)
+            chunk_adv = _to_chunks(adv_norm)
+            chunk_ret = _to_chunks(returns)
+            chunk_next_rays = _to_chunks(buf_next_rays)
+            chunk_compass = _to_chunks(buf_compass_tgt)
+            # chunk_init_gru is list[num_chunks_per_env] of (1, num_envs, gru_dim) -> (total_chunks, gru_dim)
+            chunk_gru = torch.cat([g.squeeze(0) for g in chunk_init_gru], dim=0).contiguous()
+            chunk_slots = torch.cat(chunk_init_slots, dim=0).contiguous()
+
+            progress = min(1.0, float(upd - start_update) / float(max(1, total_updates)))
+            cur_ent_coef = ent_coef_start + (ent_coef_end - ent_coef_start) * progress
 
             model.train()
             mb_size = max(1, min(total_chunks, minibatch_chunks))
@@ -570,28 +591,22 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
             for _ in range(ppo_epochs):
                 perm = np_rng.permutation(total_chunks)
                 for start in range(0, total_chunks, mb_size):
-                    mb_idx = perm[start : start + mb_size]
-                    bsz_mb = len(mb_idx)
+                    mb_idx_np = perm[start : start + mb_size]
+                    mb_idx = torch.as_tensor(mb_idx_np, dtype=torch.long)
+                    bsz_mb = len(mb_idx_np)
 
-                    # Stack chunk batch -> (bsz_mb, bptt_len, ...)
-                    mb_dict: dict[str, torch.Tensor] = {}
-                    keys = ("rays", "ent_feats", "ent_types", "ent_mask", "vitals", "rgb_depth", "grid", "action_mask")
-                    for k in keys:
-                        mb_dict[k] = torch.stack(
-                            [torch.cat([getattr(chunk_inputs[idx][t], k) for t in range(bptt_len)], dim=0) for idx in mb_idx],
-                            dim=0,
-                        ).to(device)
-                    mb_dones = torch.stack([chunk_dones_list[idx] for idx in mb_idx], dim=0).to(device)
-                    mb_actions = torch.stack([chunk_actions_list[idx] for idx in mb_idx], dim=0).to(device)
-                    mb_old_lp = torch.stack([chunk_old_lp_list[idx] for idx in mb_idx], dim=0).to(device)
-                    mb_adv = torch.stack([chunk_adv_list[idx] for idx in mb_idx], dim=0).to(device)
-                    mb_ret = torch.stack([chunk_ret_list[idx] for idx in mb_idx], dim=0).to(device)
-                    mb_next_rays = torch.stack([chunk_next_rays_list[idx] for idx in mb_idx], dim=0).to(device)
-                    mb_compass = torch.stack([chunk_compass_list[idx] for idx in mb_idx], dim=0).to(device)
+                    mb_dict = {k: v[mb_idx].to(device, non_blocking=True) for k, v in chunk_obs.items()}
+                    mb_dones = chunk_dones[mb_idx].to(device, non_blocking=True)
+                    mb_actions = chunk_actions[mb_idx].to(device, non_blocking=True)
+                    mb_old_lp = chunk_old_lp[mb_idx].to(device, non_blocking=True)
+                    mb_adv = chunk_adv[mb_idx].to(device, non_blocking=True)
+                    mb_ret = chunk_ret[mb_idx].to(device, non_blocking=True)
+                    mb_next_rays = chunk_next_rays[mb_idx].to(device, non_blocking=True)
+                    mb_compass = chunk_compass[mb_idx].to(device, non_blocking=True)
 
                     mb_h = RecurrentState(
-                        gru_h=torch.cat([chunk_gru_list[idx] for idx in mb_idx], dim=1).to(device),
-                        obj_slots=torch.cat([chunk_slots_list[idx] for idx in mb_idx], dim=0).to(device),
+                        gru_h=chunk_gru[mb_idx].unsqueeze(0).to(device, non_blocking=True),
+                        obj_slots=chunk_slots[mb_idx].to(device, non_blocking=True),
                     )
 
                     logits, values, aux, _ = bptt_unroll(
@@ -622,7 +637,7 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     loss = (
                         pg_loss
                         + vf_coef * v_loss
-                        - ent_coef * ent_loss
+                        - cur_ent_coef * ent_loss
                         + aux_coef * ray_loss
                         + compass_coef * compass_loss
                         + rnd_loss
@@ -646,14 +661,94 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
             if completed_returns:
                 last_mean_return = float(np.mean(completed_returns))
 
+            roll_ret = float(np.mean(rolling_returns)) if rolling_returns else last_mean_return
+            roll_exit = float(np.mean(rolling_exits)) if rolling_exits else 0.0
+            roll_kill = float(np.mean(rolling_kills)) if rolling_kills else 0.0
+
+            if use_llm_coach and not fixed_wad and (upd % coach_interval == 0):
+                telemetry = {
+                    "global_step": global_step,
+                    "update_idx": upd,
+                    "mean_return": round(roll_ret, 3),
+                    "exit_rate": round(roll_exit, 3),
+                    "mean_kills": round(roll_kill, 3),
+                    "stuck_rate": 0.25 if roll_ret < -3.0 else 0.10,
+                    "sector_coverage": min(1.0, max(0.2, 0.5 + 0.03 * roll_ret)),
+                }
+                cur_knobs = {
+                    "num_rooms": int(4 + round(plr.global_knobs.get("num_rooms_offset", 0.0))),
+                    "enemies_per_room": round(2.0 * float(plr.global_knobs.get("enemies_per_room_mult", 1.0)), 2),
+                    "ammo_mult": float(plr.global_knobs.get("ammo_mult", 1.0)),
+                }
+                advised = advise_curriculum(telemetry, cur_knobs)
+                plr.update_knobs(advised)
+                print(f"  [LLMCoach @ step {global_step:,}] updated PLR knobs -> {advised}", flush=True)
+
+            upd_dt = max(1e-6, time.perf_counter() - upd_t0)
+            sps = steps_per_update / upd_dt
+            if (upd - start_update) % log_interval == 0 or upd == start_update + total_updates:
+                elapsed_m = (time.perf_counter() - train_t0) / 60.0
+                print(
+                    f"[Upd {upd}/{start_update + total_updates} | step {global_step:,} | "
+                    f"{sps:.0f} SPS | {elapsed_m:.1f}m] ret={roll_ret:+.2f} "
+                    f"exit={roll_exit*100:.1f}% kills={roll_kill:.2f} "
+                    f"loss={last_loss:.4f} ent={cur_ent_coef:.4f}",
+                    flush=True,
+                )
+
             if wandb_run is not None:
                 wandb_run.log(
                     {
                         "train/loss": last_loss,
-                        "rollout/ep_return": last_mean_return,
+                        "train/sps": sps,
+                        "train/ent_coef": cur_ent_coef,
+                        "rollout/ep_return": roll_ret,
+                        "rollout/exit_rate": roll_exit,
+                        "rollout/kills": roll_kill,
                         "plr/bc_kl_beta": bc_beta,
                     },
                     step=global_step,
+                )
+
+            if rolling_returns and roll_ret > best_mean_return:
+                best_mean_return = roll_ret
+                summary_meta = {
+                    "total_score": round(best_mean_return, 3),
+                    "exit_rate": round(roll_exit, 3),
+                    "mean_act_ms": 0.0,
+                    "p99_act_ms": 0.0,
+                }
+                best_ckpt_path = save_checkpoint(
+                    ckpt_dir / "best.pt",
+                    model=model,
+                    model_config=model_cfg,
+                    global_step=global_step,
+                    update_idx=upd,
+                    scorer_summary=summary_meta,
+                )
+                if best_out_path is not None:
+                    save_checkpoint(
+                        best_out_path,
+                        model=model,
+                        model_config=model_cfg,
+                        global_step=global_step,
+                        update_idx=upd,
+                        scorer_summary=summary_meta,
+                    )
+
+            if (upd - start_update) % latest_interval == 0 or upd == start_update + total_updates:
+                save_checkpoint(
+                    ckpt_dir / "latest.pt",
+                    model=model,
+                    model_config=model_cfg,
+                    global_step=global_step,
+                    update_idx=upd,
+                    scorer_summary={
+                        "total_score": round(roll_ret, 3),
+                        "exit_rate": round(roll_exit, 3),
+                        "mean_act_ms": 0.0,
+                        "p99_act_ms": 0.0,
+                    },
                 )
 
             if upd % save_interval == 0 or upd == start_update + total_updates:
@@ -677,7 +772,9 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
         "global_step": global_step,
         "last_loss": last_loss,
         "mean_return": last_mean_return,
+        "best_return": best_mean_return if best_mean_return > -float("inf") else last_mean_return,
         "checkpoint": str(last_ckpt_path) if last_ckpt_path else None,
+        "best_checkpoint": str(best_ckpt_path) if best_ckpt_path else None,
     }
 
 
@@ -687,8 +784,41 @@ run_training = train
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Train Self-Evolving Recurrent PPO DOOM agent.")
     parser.add_argument("--config", type=str, default="training/configs/ppo_curriculum.yaml")
+    parser.add_argument("--total-updates", type=int, default=None)
+    parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--num-envs", type=int, default=None)
+    parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--best-out", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--save-interval", type=int, default=None)
+    parser.add_argument("--coach-interval", type=int, default=None)
+    parser.add_argument("--use-llm-coach", action="store_true", default=False)
     args = parser.parse_args(argv)
-    res = train(args.config)
+
+    cfg = _load_cfg_dict(args.config)
+    if args.total_updates is not None:
+        cfg["total_updates"] = int(args.total_updates)
+    if args.max_steps is not None:
+        cfg["max_steps"] = int(args.max_steps)
+    if args.num_envs is not None:
+        cfg["num_envs"] = int(args.num_envs)
+    if args.output_dir is not None:
+        cfg["output_dir"] = args.output_dir
+    if args.best_out is not None:
+        cfg["best_out"] = args.best_out
+    if args.resume is not None:
+        cfg["resume_checkpoint"] = args.resume
+    if args.device is not None:
+        cfg["device"] = args.device
+    if args.save_interval is not None:
+        cfg["save_interval"] = int(args.save_interval)
+    if args.coach_interval is not None:
+        cfg["coach_interval"] = int(args.coach_interval)
+    if args.use_llm_coach:
+        cfg["use_llm_coach"] = True
+
+    res = train(cfg)
     print(res)
     return 0
 

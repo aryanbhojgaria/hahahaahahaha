@@ -152,6 +152,36 @@ def test_preprocess_reset_and_action_masks():
     torch.testing.assert_close(inp_a.vitals, inp_b.vitals)
 
 
+def test_preprocess_direct_prev_action_use_cooldown_six_steps():
+    obs_near = _synthetic_obs(48, 64, weapon=2, ammo=10)
+    obs_near["rays"]["hit_type"][0] = RAY_LOCKED
+    obs_near["rays"]["distance"][0] = 0.10
+
+    # Distant door (>= 0.15) must NOT trigger USE cooldown
+    obs_far = _synthetic_obs(48, 64, weapon=2, ammo=10)
+    obs_far["rays"]["hit_type"][0] = RAY_DOOR
+    obs_far["rays"]["distance"][0] = 0.20
+    _, st_far = preprocess(obs_far, None)
+    st_far.prev_action = np.array([0, 0, 0, 0, 0, 0, 0, 1, 0], dtype=np.float32)
+    inp_far, st_far = preprocess(obs_far, st_far)
+    assert bool(inp_far.action_mask[0, 7]) is True
+    assert st_far.use_cooldown == 0
+
+    # Direct prev_action[7] = 1 without update_action_state() masks USE for exactly 6 steps
+    _, st = preprocess(obs_near, None)
+    st.prev_action = np.array([0, 0, 0, 0, 0, 0, 0, 1, 0], dtype=np.float32)
+    for step_idx in range(6):
+        inp_cd, st = preprocess(obs_near, st)
+        assert bool(inp_cd.action_mask[0, 7]) is False, f"Expected USE masked on step {step_idx}"
+        if step_idx == 0:
+            assert st.use_cooldown == 6
+        st.prev_action = np.zeros(9, dtype=np.float32)
+
+    inp_after, st = preprocess(obs_near, st)
+    assert bool(inp_after.action_mask[0, 7]) is True
+    assert st.use_cooldown == 0
+
+
 def test_preprocess_translation_invariance_in_doom_env():
     grid = "#########\n#P.....z#\n#..D....#\n#########"
     shifted = "\n".join(["#" * 13] * 3 + ["####" + row for row in grid.splitlines()])
