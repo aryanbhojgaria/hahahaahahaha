@@ -48,7 +48,7 @@ pip install -r requirements.txt
 
 ### Train
 
-Run the self-evolving PPO curriculum trainer:
+Run the self-evolving PPO curriculum trainer (with optional live CreoAI LLM Coach & resume):
 
 ```bash
 # Offline smoke test (no API key required)
@@ -60,7 +60,14 @@ CREO_API_KEY="" uv run python -m training.ppo \
 CREO_API_KEY="<your-key>" uv run python -m training.ppo \
   --config training/configs/ppo_curriculum.yaml \
   --use-llm-coach \
+  --coach-interval 25 \
   --best-out submission/weights/best_agent.pt
+
+# Resume from an existing checkpoint
+uv run python -m training.ppo \
+  --config training/configs/ppo_curriculum.yaml \
+  --resume runs/ppo_flagship/checkpoints/latest.pt \
+  --use-llm-coach
 ```
 
 Supported CLI overrides include `--max-steps`, `--total-updates`, `--num-envs`, `--output-dir`, `--best-out`, `--resume`, `--device`, `--save-interval`, `--coach-interval`, and `--use-llm-coach`.
@@ -68,15 +75,18 @@ Supported CLI overrides include `--max-steps`, `--total-updates`, `--num-envs`, 
 ### Score on Held-Out Suite & Live Spectator
 
 ```bash
-# Evaluate a checkpoint on the held-out benchmark suite
+# Evaluate a checkpoint on the 27-map held-out benchmark suite
 uv run python -m training.scorer.score_checkpoint \
   --checkpoint submission/weights/best_agent.pt \
   --suite training/scorer/eval_suite.json \
+  --out eval_results_baseline.json \
   --device cpu
 
-# Watch the agent live (RGB + ego-centric occupancy grid)
-uv run python -m training.visualize_obs
+# Watch the agent live (RGB + 32×32 ego-centric occupancy grid + 64-ray radar)
+uv run python training/visualize_obs.py --checkpoint submission/weights/best_agent.pt --watch --random-maps
 ```
+
+> **Current Submitted Checkpoint (`557k` steps):** `386.14` total score (`2.37 ms` mean `act()`, `12.55 ms` p99, `validate.py` **PASSED**).
 
 ### Validate
 

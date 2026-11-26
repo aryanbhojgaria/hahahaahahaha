@@ -38,7 +38,8 @@ Evaluated on `training/scorer/eval_suite.json` (24 disjoint procedural WADs + 3 
 | Configuration / Checkpoint | Total Score | Exit Rate | Tier 1–4 Avg | Mean `act()` ms |
 | :--- | :---: | :---: | :---: | :---: |
 | Random Baseline (`init_baseline`) | `0.00` | `0.0%` | `0.0` | `10.0 ms` |
-| **Full `HybridDoomNet` + PLR + RND (`best.pt`, 77.8k steps)** | **`344.28`** | **`3.7%`** | **`19.0 / 6.2 / 11.7 / 15.0`** | **`3.28 ms`** |
+| `HybridDoomNet` + PLR + RND (`77.8k` steps) | `344.28` | `3.7%` | `19.0 / 6.2 / 11.7 / 15.0` | `3.28 ms` |
+| **`HybridDoomNet` + PLR + RND + LLM Coach (`557k` steps, submitted)** | **`386.14`** | `0.0%` | **`7.7 / 16.9 / 6.6 / 25.1`** | **`2.37 ms`** |
 
 ### 5. Honest Limitations & Future Work
 - **Scan-Matching Drift:** Rapid multi-tic wall collisions can introduce minor `Δθ` drift in the `32×32` local grid, partially mitigated by exponential decay (`0.992`) and GRU hidden state.
