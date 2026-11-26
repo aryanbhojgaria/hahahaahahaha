@@ -83,3 +83,37 @@ def test_compare_checkpoints_sorts_and_promotes(tmp_path: Path) -> None:
     assert dest.read_bytes() == b"ckpt2"
     saved = json.loads(out_json.read_text(encoding="utf-8"))
     assert saved["leaderboard"][0]["total_score"] == 1440.45
+
+
+def test_plot_diagnostics_creates_png(tmp_path: Path) -> None:
+    from training.scorer.plot_diagnostics import generate_chart
+
+    diag_json = tmp_path / "diag.json"
+    out_png = tmp_path / "chart.png"
+    diag_json.write_text(
+        json.dumps(
+            {
+                "total_score": 1440.45,
+                "diagnostics": {
+                    "per_tier": {
+                        "1": {"count": 6, "exits": 3, "avg_score": 39.7, "avg_kills": 2.0, "avg_exploration": 0.667},
+                        "2": {"count": 7, "exits": 1, "avg_score": 42.36, "avg_kills": 1.86, "avg_exploration": 0.533},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    generate_chart(diag_json, out_png)
+    assert out_png.is_file()
+    assert out_png.stat().st_size > 10_000
+
+
+def test_render_replay_policy_bar_shape() -> None:
+    from training.scorer.render_replay import draw_policy_bar
+
+    probs = np.linspace(0.1, 0.9, 9, dtype=np.float32)
+    action = np.array([1, 0, 0, 0, 1, 0, 1, 0, 0], dtype=np.int8)
+    strip = draw_policy_bar(probs, action, step_idx=12, total_w=960, bar_h=64)
+    assert strip.shape == (64, 960, 3)
+    assert strip.dtype == np.uint8
