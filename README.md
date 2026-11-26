@@ -51,17 +51,31 @@ pip install -r requirements.txt
 Run the self-evolving PPO curriculum trainer:
 
 ```bash
-# Using uv
-uv run python -m training.ppo --config training/configs/ppo_curriculum.yaml
+# Offline smoke test (no API key required)
+CREO_API_KEY="" uv run python -m training.ppo \
+  --config training/configs/ppo_curriculum.yaml \
+  --max-steps 500
 
-# Or inside an activated virtual environment
-python -m training.ppo --config training/configs/ppo_curriculum.yaml
+# Full training with live CreoAI LLM Curriculum Coach
+CREO_API_KEY="<your-key>" uv run python -m training.ppo \
+  --config training/configs/ppo_curriculum.yaml \
+  --use-llm-coach \
+  --best-out submission/weights/best_agent.pt
 ```
 
-To run offline without LLM Coach API calls, pass an empty `CREO_API_KEY`:
+Supported CLI overrides include `--max-steps`, `--total-updates`, `--num-envs`, `--output-dir`, `--best-out`, `--resume`, `--device`, `--save-interval`, `--coach-interval`, and `--use-llm-coach`.
+
+### Score on Held-Out Suite & Live Spectator
 
 ```bash
-CREO_API_KEY="" uv run python -m training.ppo --config training/configs/ppo_curriculum.yaml
+# Evaluate a checkpoint on the held-out benchmark suite
+uv run python -m training.scorer.score_checkpoint \
+  --checkpoint submission/weights/best_agent.pt \
+  --suite training/scorer/eval_suite.json \
+  --device cpu
+
+# Watch the agent live (RGB + ego-centric occupancy grid)
+uv run python -m training.visualize_obs
 ```
 
 ### Validate
@@ -89,6 +103,19 @@ python -c "from submission.agent import DoomAgent; print('OK')"
 ```bash
 uv run pytest
 ```
+
+---
+
+## Held-Out Benchmark & Validation Results
+
+Evaluated on [training/scorer/eval_suite.json](training/scorer/eval_suite.json) (24 disjoint procedural WADs + 3 `freedoom2.wad` maps) and verified with `validate.py` (see [eval_results_baseline.json](eval_results_baseline.json)):
+
+| Metric | Value (`best_agent.pt`, 77.8k steps) |
+| --- | --- |
+| Held-out Total Score | **344.28** (`Tier 1–4 avg: 19.0 / 6.2 / 11.7 / 15.0`) |
+| Held-out Exit Rate | **3.7%** |
+| Scorer Latency (1 CPU thread) | **3.28 ms** mean / **18.74 ms** p99 *(budget: 40 ms)* |
+| `validate.py` Status | **PASSED** (`p50: 2.0 ms`, `p99: 7.5 ms`, repo `8.5 MB / 1.0 GB`) |
 
 ---
 
@@ -128,7 +155,9 @@ PROJECT_BRIEF.md          # 2-page project brief
 
 | Doc | Contents |
 | --- | --- |
-| [PROJECT_BRIEF.md](PROJECT_BRIEF.md) | 2-page architecture overview, USP, and track compliance summary |
+| [PROJECT_BRIEF.pdf](PROJECT_BRIEF.pdf) | Final 2-page Project Brief PDF for submission |
+| [docs/PROJECT_BRIEF.md](docs/PROJECT_BRIEF.md) | 2-page architecture overview, benchmarks, and rule compliance |
+| [eval_results_baseline.json](eval_results_baseline.json) | Held-out evaluation scorecard for `submission/weights/best_agent.pt` |
 | [docs/CONTRACT.md](docs/CONTRACT.md) | Observation/action spaces and `DoomAgent` interface |
 | [docs/RULES.md](docs/RULES.md) | Ground rules and disqualifiers (no hardcoded XYZ, no rule trees / A* / aimbots) |
 | [docs/SUBMISSION.md](docs/SUBMISSION.md) | Submission checklist, Git LFS, 1 GB limit, `requirements.txt` |

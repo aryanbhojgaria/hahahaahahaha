@@ -1,6 +1,6 @@
 # DevForge Track 1: Zero-Shot Ego-Centric DOOM Agent — Project Brief
 
-> **Team:** Vedesh (RL Core & Training), Aryan (Neural Architecture & Scorer), Aman (Procedural MapGen, Rewards & PLR Curriculum)  
+> **Team:** Vedesh (RL Core & Training), Aryan (Neural Architecture & Scorer), Aman (Procedural MapGen, Rewards & PLR Curriculum), Swapnil (Training & Docs)  
 > **Target:** `vizdoom==1.3.3` | `freedoom2.wad` | Skill 3 ("Hurt me plenty") | `FRAME_SKIP = 4` | `1` CPU Thread (`< 25 ms/step`)
 
 ---
