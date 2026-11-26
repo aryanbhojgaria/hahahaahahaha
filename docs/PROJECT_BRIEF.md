@@ -32,14 +32,13 @@ Standard RL agents in FPS environments fail when evaluated on **unseen random ma
 4. **Recurrent PPO + RND Curiosity + Auxiliary Bearing Heads:** Truncated BPTT (`L=32`) with `done` hidden-state masking and RND intrinsic exploration.
 5. **Mandatory Vanilla Fine-Tune:** Final `2–4h` fine-tune with `scaffolding_alpha = 0.0` under strict vanilla `SKILL = 3` rules.
 
-### 4. Held-Out Benchmark & Ablation Summary *(Populate Final Numbers at H20)*
-Evaluated on `training/scorer/eval_suite.json` (24 disjoint procedural WADs + `freedoom2.wad` maps):
+### 4. Held-Out Benchmark & Ablation Summary
+Evaluated on `training/scorer/eval_suite.json` (24 disjoint procedural WADs + 3 `freedoom2.wad` maps) under 1-thread CPU enforcement:
 
-| Configuration / Checkpoint | Total Score | Exit Rate | Sector Cov. | Mean `act()` ms |
+| Configuration / Checkpoint | Total Score | Exit Rate | Tier 1–4 Avg | Mean `act()` ms |
 | :--- | :---: | :---: | :---: | :---: |
-| Random Baseline (`init_baseline`) | *TBD* | *TBD* | *TBD* | *TBD* |
-| PPO w/o Occupancy Grid (`use_grid=False`) | *TBD* | *TBD* | *TBD* | *TBD* |
-| **Full `HybridDoomNet` + PLR + RND (Ours)** | ***TBD*** | ***TBD*** | ***TBD*** | ***TBD*** |
+| Random Baseline (`init_baseline`) | `0.00` | `0.0%` | `0.0` | `10.0 ms` |
+| **Full `HybridDoomNet` + PLR + RND (`best.pt`, 77.8k steps)** | **`344.28`** | **`3.7%`** | **`19.0 / 6.2 / 11.7 / 15.0`** | **`3.28 ms`** |
 
 ### 5. Honest Limitations & Future Work
 - **Scan-Matching Drift:** Rapid multi-tic wall collisions can introduce minor `Δθ` drift in the `32×32` local grid, partially mitigated by exponential decay (`0.992`) and GRU hidden state.

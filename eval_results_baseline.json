@@ -1,0 +1,14 @@
+{
+  "checkpoint": "runs/ppo_flagship/checkpoints/best.pt",
+  "total_score": 344.28,
+  "tier_scores": {
+    "1": 19.025396825396825,
+    "2": 6.172308733920109,
+    "3": 11.717747010698554,
+    "4": 14.98469387755102
+  },
+  "exit_rate": 0.037,
+  "mean_act_ms": 3.28,
+  "p99_act_ms": 18.74,
+  "passed_limits": true
+}
