@@ -86,7 +86,9 @@ uv run python -m training.scorer.score_checkpoint \
 uv run python training/visualize_obs.py --checkpoint submission/weights/best_agent.pt --watch --random-maps
 ```
 
-> **Current Submitted Checkpoint (`557k` steps):** `386.14` total score (`2.37 ms` mean `act()`, `12.55 ms` p99, `validate.py` **PASSED**).
+> **Current Submitted Checkpoint (`806.9k` steps):** **`504.13`** total score on 27 held-out maps (`2.22 ms` mean `act()`, `14.09 ms` p99, `validate.py` **PASSED**).
+>
+> ![Training & Held-Out Analytics](docs/training_analytics.png)
 
 ### Validate
 
