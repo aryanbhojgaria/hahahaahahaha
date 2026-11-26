@@ -270,6 +270,7 @@ class HybridDoomNet(nn.Module):
         self.aux_next_rays = nn.Linear(core_dim, 16)
         self.aux_door_bearing = nn.Linear(core_dim, 3)  # [has_door, sin, cos]
         self.aux_key_bearing = nn.Linear(core_dim, 3)   # [has_key, sin, cos]
+        self.aux_value_compass = nn.Linear(core_dim, 8)  # 8-sector Ego-Directional Value Compass (B, 8)
 
     def forward(
         self,
@@ -328,5 +329,6 @@ class HybridDoomNet(nn.Module):
             aux_dict["pred_next_rays"] = self.aux_next_rays(core_repr)
             aux_dict["pred_door_bearing"] = self.aux_door_bearing(core_repr)
             aux_dict["pred_key_bearing"] = self.aux_key_bearing(core_repr)
+            aux_dict["value_compass"] = self.aux_value_compass(core_repr)
 
         return logits, value, next_recurrent_state, aux_dict
