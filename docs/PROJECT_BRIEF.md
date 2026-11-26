@@ -32,7 +32,7 @@ Standard RL agents in FPS environments fail when evaluated on **unseen random ma
 4. **Recurrent PPO + RND Curiosity + Auxiliary Bearing Heads:** Truncated BPTT (`L=32`) with `done` hidden-state masking and RND intrinsic exploration.
 5. **Mandatory Vanilla Fine-Tune:** Final `2–4h` fine-tune with `scaffolding_alpha = 0.0` under strict vanilla `SKILL = 3` rules.
 
-### 4. Held-Out Benchmark, Temperature Ablation & Per-Tier Diagnostics
+### 4. Held-Out Benchmark & Ablation Summary
 Evaluated on `training/scorer/eval_suite.json` (24 disjoint procedural WADs + 3 `freedoom2.wad` maps) under 1-thread CPU enforcement:
 
 | Configuration / Checkpoint | Total Score | Exit Rate | Tier 1–4 Avg | Mean `act()` ms |
@@ -41,13 +41,9 @@ Evaluated on `training/scorer/eval_suite.json` (24 disjoint procedural WADs + 3 
 | `HybridDoomNet` + PLR + RND (`77.8k` steps) | `344.28` | `3.7%` | `19.0 / 6.2 / 11.7 / 15.0` | `3.28 ms` |
 | `HybridDoomNet` + PLR + RND + LLM Coach (`557k` steps) | `386.14` | `0.0%` | `7.7 / 16.9 / 6.6 / 25.1` | `2.37 ms` |
 | `HybridDoomNet` + PLR + RND + LLM Coach (`806.9k` steps) | `504.13` | `3.7%` | `19.2 / 14.0 / 18.3 / 23.3` | `2.22 ms` |
-| **Staged Curriculum (`377.9k` steps, `tau=0.85`, submitted)** | **`1440.45`** | **`14.8%`** | **`39.7 / 42.4 / 63.4 / 66.0`** | **`5.66 ms`** |
-
-- **Sampling Temperature (`tau`) Ablation on `377.9k` Checkpoint:** `tau=0.50` (`1217.46`, `7.4%` exit), `tau=0.65` (`1050.80`, `3.7%` exit), **`tau=0.85` (`1440.45`, `14.8%` exit, `56` kills)**, `tau=1.00` (`1085.30`, `11.1%` exit).
-- **Diagnostic Breakdown (`eval_results_diagnostics.json`):** `56` total kills, `35` doors opened, `7` keycards collected, `46.8%` mean sector exploration, only `3/27` timeouts (`20` deaths / `15` early deaths).
-
-![Held-Out Diagnostics & Temperature Ablation](heldout_diagnostics.png)
+| `HybridDoomNet` + Teacher → BC + Interactive DAgger (`R1`) | `2,406.13` | `14.8%` | `42.9 / 58.3 / 113.8 / 134.8` | `1.94 ms` |
+| **`HybridDoomNet` + DAgger → BC-KL Anchored PPO (`881k`, submitted)** | **`3,122.37`** | **`22.2%`** | **`51.7 / 90.2 / 114.7 / 196.9`** | **`3.02 ms`** |
 
 ### 5. Honest Limitations & Future Work
 - **Scan-Matching Drift:** Rapid multi-tic wall collisions can introduce minor `Δθ` drift in the `32×32` local grid, partially mitigated by exponential decay (`0.992`) and GRU hidden state.
-- **Early Combat Survival & Key-to-Lock Backtracking:** Diagnostic breakdown shows `15` early deaths and `0/7` collected keycards converted into unlocked doors on Tiers 3–4; continued Stage 3–4 vanilla fine-tuning directly targets this bottleneck.
+- **Long-Horizon Key Backtracking:** Tier 4 multi-lock gauntlets with scarce ammo remain sensitive to early exploration entropy; future work includes hierarchical subgoal options over the objective memory slots.

@@ -27,12 +27,12 @@ class RewardWeights:
     damage_per_hp: float = -0.02
     death: float = -4.00
     door_reversal_bounce: float = -0.30
-    stuck_wall_scrape: float = -0.02
+    stuck_wall_scrape: float = -0.06
     wasted_shot: float = -0.015
     step_cost: float = -0.002
     # Anti-loop / exploration shaping (training-only, relative displacement)
     new_cell: float = 0.06
-    loop_penalty: float = -0.015
+    loop_penalty: float = -0.03
     conflict_buttons: float = -0.01
     backward_move: float = -0.004
     forward_progress: float = 0.004

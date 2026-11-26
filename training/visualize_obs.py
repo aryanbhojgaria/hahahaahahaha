@@ -479,6 +479,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--wad", type=str, default=None, help="Optional fixed WAD path instead of MapGen.")
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to .pt checkpoint to drive DoomAgent.")
     parser.add_argument("--watch", action="store_true", help="Auto-reload checkpoint when modified during training.")
+    parser.add_argument("--teacher", action="store_true", help="Watch the training-only Privileged Teacher Bot live (switches to --checkpoint once created).")
     parser.add_argument("--random-maps", action="store_true", help="Sample fresh Tier 1-4 maps on each episode.")
     parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--fps", type=int, default=15, help="Spectator render FPS.")
@@ -566,6 +567,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     obs, _ = env.reset(seed=0)
     shaper.reset(env.sector_polygons())
     priv_prev = env.privileged_state()
+    teacher_bot = None
+    if args.teacher:
+        from training.bc.teacher_bot import PrivilegedTeacherBot
+        teacher_bot = PrivilegedTeacherBot(wad_path, env.sector_polygons())
     if agent is not None:
         agent.reset()
 
@@ -607,7 +612,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                             force_new_map = True
 
             t0 = time.perf_counter()
-            act = agent.act(obs) if agent is not None else _read_keyboard_action()
+            if agent is not None and ckpt_step > 0:
+                act = agent.act(obs)
+            elif teacher_bot is not None:
+                act = teacher_bot.act(obs, priv_prev)
+            elif agent is not None:
+                act = agent.act(obs)
+            else:
+                act = _read_keyboard_action()
             act_ms = (time.perf_counter() - t0) * 1000.0
             obs, _, terminated, truncated, info = env.step(act)
             priv_now = env.privileged_state()
@@ -634,6 +646,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 obs, _ = env.reset(seed=ep_idx)
                 shaper.reset(env.sector_polygons())
                 priv_prev = env.privileged_state()
+                if args.teacher:
+                    from training.bc.teacher_bot import PrivilegedTeacherBot
+                    teacher_bot = PrivilegedTeacherBot(wad_path, env.sector_polygons())
                 if agent is not None:
                     agent.reset()
 
@@ -654,7 +669,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 win_h,
             )
             hud_meta = {
-                "mode": "AGENT WATCH" if (agent and args.watch) else ("AGENT LIVE" if agent else "MANUAL"),
+                "mode": "AGENT WATCH" if (agent and ckpt_step > 0) else ("TEACHER LIVE" if teacher_bot else ("AGENT LIVE" if agent else "MANUAL")),
                 "map_label": map_label,
                 "ckpt_step": ckpt_step,
                 "ckpt_upd": ckpt_upd,

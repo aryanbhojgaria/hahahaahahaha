@@ -1,233 +1,233 @@
 {
-  "checkpoint": "runs/ppo_flagship/checkpoints/best.pt",
-  "total_score": 1440.45,
+  "checkpoint": "runs/ppo_from_dagger/checkpoints/latest.pt",
+  "total_score": 3122.37,
   "tier_scores": {
-    "1": 39.702380952380956,
-    "2": 42.35630863719895,
-    "3": 63.43038074260541,
-    "4": 65.96190476190476
+    "1": 51.656746031746025,
+    "2": 90.18594399845244,
+    "3": 114.71431193622826,
+    "4": 196.87517006802724
   },
-  "exit_rate": 0.148,
-  "mean_act_ms": 1.8,
-  "p99_act_ms": 12.61,
+  "exit_rate": 0.222,
+  "mean_act_ms": 3.02,
+  "p99_act_ms": 13.03,
   "passed_limits": true,
   "maps_evaluated": 27,
   "results": [
     {
       "id": "heldout_t1_1001",
       "tier": 1,
-      "exit_reached": true,
-      "score": 71.9,
-      "kills": 3,
-      "mean_act_ms": 1.8238740234491637
+      "exit_reached": false,
+      "score": 30.0,
+      "kills": 5,
+      "mean_act_ms": 3.8407371142862496
     },
     {
       "id": "heldout_t2_1002",
       "tier": 2,
       "exit_reached": true,
-      "score": 114.61785714285713,
-      "kills": 2,
-      "mean_act_ms": 1.7779241569542137
+      "score": 129.27142857142857,
+      "kills": 4,
+      "mean_act_ms": 2.9832834052501283
     },
     {
       "id": "heldout_t3_1003",
       "tier": 3,
       "exit_reached": false,
-      "score": 56.25,
-      "kills": 1,
-      "mean_act_ms": 1.7382896498119944
+      "score": 115.5,
+      "kills": 4,
+      "mean_act_ms": 3.1931220305254793
     },
     {
       "id": "heldout_t4_1004",
       "tier": 4,
       "exit_reached": false,
-      "score": 12.857142857142858,
-      "kills": 0,
-      "mean_act_ms": 1.7478795294270648
+      "score": 196.32857142857145,
+      "kills": 8,
+      "mean_act_ms": 3.103639590379366
     },
     {
       "id": "heldout_t1_1005",
       "tier": 1,
       "exit_reached": false,
-      "score": 5.0,
-      "kills": 2,
-      "mean_act_ms": 1.7733611078852767
+      "score": 26.25,
+      "kills": 5,
+      "mean_act_ms": 3.1939152418878316
     },
     {
       "id": "heldout_t2_1006",
       "tier": 2,
       "exit_reached": false,
-      "score": 41.55,
-      "kills": 3,
-      "mean_act_ms": 1.7455001204405307
+      "score": 79.19999999999999,
+      "kills": 8,
+      "mean_act_ms": 3.5179917161440244
     },
     {
       "id": "heldout_t3_1007",
       "tier": 3,
       "exit_reached": false,
-      "score": 75.0,
-      "kills": 1,
-      "mean_act_ms": 1.7612666898935845
+      "score": 52.5,
+      "kills": 2,
+      "mean_act_ms": 2.694564874244471
     },
     {
       "id": "heldout_t4_1008",
       "tier": 4,
       "exit_reached": false,
-      "score": 122.22857142857144,
-      "kills": 5,
-      "mean_act_ms": 1.7857671266712343
+      "score": 211.17857142857142,
+      "kills": 7,
+      "mean_act_ms": 2.7452993514296913
     },
     {
       "id": "heldout_t1_1009",
       "tier": 1,
-      "exit_reached": false,
-      "score": 10.0,
-      "kills": 1,
-      "mean_act_ms": 2.481537619884045
+      "exit_reached": true,
+      "score": 70.72380952380952,
+      "kills": 2,
+      "mean_act_ms": 2.6507031598157482
     },
     {
       "id": "heldout_t2_1010",
       "tier": 2,
-      "exit_reached": false,
-      "score": 22.5,
-      "kills": 1,
-      "mean_act_ms": 1.7819423910741417
+      "exit_reached": true,
+      "score": 125.9,
+      "kills": 4,
+      "mean_act_ms": 2.3782793041098027
     },
     {
       "id": "heldout_t3_1011",
       "tier": 3,
       "exit_reached": false,
-      "score": 78.75,
-      "kills": 2,
-      "mean_act_ms": 1.6871833409337949
+      "score": 169.79166666666669,
+      "kills": 4,
+      "mean_act_ms": 3.0277383333200953
     },
     {
       "id": "heldout_t4_1012",
       "tier": 4,
       "exit_reached": false,
-      "score": 133.7785714285714,
-      "kills": 6,
-      "mean_act_ms": 1.7577994568827784
+      "score": 244.20000000000002,
+      "kills": 9,
+      "mean_act_ms": 2.261868055713568
     },
     {
       "id": "heldout_t1_1013",
       "tier": 1,
       "exit_reached": true,
-      "score": 75.33333333333334,
+      "score": 75.52380952380952,
       "kills": 2,
-      "mean_act_ms": 1.7261844727077655
+      "mean_act_ms": 2.9717856199931703
     },
     {
       "id": "heldout_t2_1014",
       "tier": 2,
       "exit_reached": false,
-      "score": 27.0,
-      "kills": 0,
-      "mean_act_ms": 1.7440863352357094
+      "score": 82.35,
+      "kills": 8,
+      "mean_act_ms": 2.8991175676249745
     },
     {
       "id": "heldout_t3_1015",
       "tier": 3,
       "exit_reached": false,
-      "score": 68.75,
-      "kills": 0,
-      "mean_act_ms": 1.7453028332157474
+      "score": 78.5,
+      "kills": 2,
+      "mean_act_ms": 2.9007055085613893
     },
     {
       "id": "heldout_t4_1016",
       "tier": 4,
       "exit_reached": false,
-      "score": 96.42857142857144,
-      "kills": 2,
-      "mean_act_ms": 1.801906503842225
+      "score": 150.42857142857144,
+      "kills": 6,
+      "mean_act_ms": 3.5838110570988473
     },
     {
       "id": "heldout_t1_1017",
       "tier": 1,
-      "exit_reached": false,
-      "score": 5.0,
-      "kills": 1,
-      "mean_act_ms": 1.8099870468075905
+      "exit_reached": true,
+      "score": 77.74285714285713,
+      "kills": 5,
+      "mean_act_ms": 3.771923522656311
     },
     {
       "id": "heldout_t2_1018",
       "tier": 2,
-      "exit_reached": false,
-      "score": 35.0,
-      "kills": 2,
-      "mean_act_ms": 1.8038022380018948
+      "exit_reached": true,
+      "score": 132.19285714285712,
+      "kills": 4,
+      "mean_act_ms": 3.3290199614608698
     },
     {
       "id": "heldout_t3_1019",
       "tier": 3,
       "exit_reached": false,
-      "score": 93.75,
-      "kills": 1,
-      "mean_act_ms": 1.8190072728633713
+      "score": 192.0,
+      "kills": 6,
+      "mean_act_ms": 3.437773838134793
     },
     {
       "id": "heldout_t4_1020",
       "tier": 4,
       "exit_reached": false,
-      "score": 41.25,
-      "kills": 1,
-      "mean_act_ms": 1.7156727004850272
+      "score": 211.95000000000002,
+      "kills": 5,
+      "mean_act_ms": 3.0878185914428156
     },
     {
       "id": "heldout_t1_1021",
       "tier": 1,
-      "exit_reached": true,
-      "score": 70.98095238095239,
-      "kills": 3,
-      "mean_act_ms": 1.7377186991233728
+      "exit_reached": false,
+      "score": 29.7,
+      "kills": 5,
+      "mean_act_ms": 3.779316519981616
     },
     {
       "id": "heldout_t2_1022",
       "tier": 2,
       "exit_reached": false,
-      "score": 35.625,
-      "kills": 3,
-      "mean_act_ms": 1.7878731211389762
+      "score": 47.849999999999994,
+      "kills": 6,
+      "mean_act_ms": 2.7225390449715707
     },
     {
       "id": "heldout_t3_1023",
       "tier": 3,
       "exit_reached": false,
-      "score": 40.125,
-      "kills": 2,
-      "mean_act_ms": 1.841471661492029
+      "score": 169.16666666666669,
+      "kills": 4,
+      "mean_act_ms": 2.9632323333394845
     },
     {
       "id": "heldout_t4_1024",
       "tier": 4,
       "exit_reached": false,
-      "score": 36.0,
-      "kills": 1,
-      "mean_act_ms": 1.7714123442319447
+      "score": 302.70000000000005,
+      "kills": 14,
+      "mean_act_ms": 2.4432010695541284
     },
     {
       "id": "freedoom2_map01",
       "tier": 2,
       "exit_reached": false,
-      "score": 20.201303317535547,
-      "kills": 2,
-      "mean_act_ms": 1.7387876703302554
+      "score": 34.53732227488152,
+      "kills": 6,
+      "mean_act_ms": 2.3057901143086688
     },
     {
       "id": "freedoom2_map02",
       "tier": 3,
       "exit_reached": false,
-      "score": 31.387665198237883,
-      "kills": 4,
-      "mean_act_ms": 1.8423045995836314
+      "score": 25.541850220264315,
+      "kills": 5,
+      "mean_act_ms": 2.799222537673379
     },
     {
       "id": "freedoom2_map03",
       "tier": 4,
       "exit_reached": false,
-      "score": 19.19047619047619,
-      "kills": 5,
-      "mean_act_ms": 1.912921291679797
+      "score": 61.34047619047619,
+      "kills": 10,
+      "mean_act_ms": 2.9833968386904948
     }
   ]
 }
