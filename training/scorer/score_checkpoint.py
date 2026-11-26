@@ -136,10 +136,16 @@ def score_episode(
         "weighted_score": weighted_score,
         "raw_score": total_map_score,
         "exit_reached": exit_reached,
+        "dead": dead,
+        "early_death": bool(dead and step_idx < (spec.episode_ticks // 8)),
+        "timed_out": bool((not exit_reached) and (not dead)),
         "keys": keys_observed,
+        "doors_opened": doors_opened,
+        "locks_unlocked": locks_unlocked,
         "kills": kills,
         "damage_taken": damage_taken,
         "exploration_frac": exploration_frac,
+        "steps_taken": step_idx,
         "mean_act_ms": mean_ms,
         "p99_act_ms": p99_ms,
         "passed_limits": (mean_ms <= AGENT_MS_PER_STEP) and (p99_ms <= ACT_TIMEOUT_S * 1000.0),
@@ -261,6 +267,32 @@ def score_checkpoint(
         for tier, scores in tier_scores.items()
     }
 
+    per_tier_diag = {}
+    for tier in (1, 2, 3, 4):
+        t_res = [r for r in results if r["tier"] == tier]
+        if t_res:
+            per_tier_diag[str(tier)] = {
+                "count": len(t_res),
+                "exits": sum(1 for r in t_res if r["exit_reached"]),
+                "avg_score": round(float(np.mean([r["weighted_score"] for r in t_res])), 2),
+                "avg_kills": round(float(np.mean([r["kills"] for r in t_res])), 2),
+                "avg_exploration": round(float(np.mean([r["exploration_frac"] for r in t_res])), 3),
+                "deaths": sum(1 for r in t_res if r["dead"]),
+                "timeouts": sum(1 for r in t_res if r["timed_out"]),
+            }
+
+    diagnostics = {
+        "total_kills": sum(r["kills"] for r in results),
+        "total_keys": sum(r["keys"] for r in results),
+        "total_doors_opened": sum(r["doors_opened"] for r in results),
+        "total_locks_unlocked": sum(r["locks_unlocked"] for r in results),
+        "deaths": sum(1 for r in results if r["dead"]),
+        "early_deaths": sum(1 for r in results if r["early_death"]),
+        "timeouts": sum(1 for r in results if r["timed_out"]),
+        "mean_exploration_frac": round(float(np.mean([r["exploration_frac"] for r in results])) if results else 0.0, 3),
+        "per_tier": per_tier_diag,
+    }
+
     summary = {
         "checkpoint": str(checkpoint_path) if checkpoint_path else "untrained_baseline",
         "total_score": round(total_score, 2),
@@ -270,13 +302,18 @@ def score_checkpoint(
         "p99_act_ms": round(p99_ms, 2),
         "passed_limits": mean_ms < AGENT_MS_PER_STEP,
         "maps_evaluated": len(suite),
+        "diagnostics": diagnostics,
         "results": [
             {
                 "id": r["map_id"],
                 "tier": r["tier"],
                 "exit_reached": r["exit_reached"],
+                "dead": r["dead"],
+                "timed_out": r["timed_out"],
                 "score": r["weighted_score"],
                 "kills": r["kills"],
+                "keys": r["keys"],
+                "exploration_frac": round(r["exploration_frac"], 3),
                 "mean_act_ms": r["mean_act_ms"],
             }
             for r in results

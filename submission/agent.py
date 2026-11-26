@@ -38,8 +38,9 @@ _NO_STATE = _NoStateType()
 class DoomAgent:
     """Zero-Shot Autonomous DOOM Agent."""
 
-    def __init__(self, observation_space=None, action_space=None, device: str = "cpu"):
+    def __init__(self, observation_space=None, action_space=None, device: str = "cpu", tau: float = 0.85):
         """Called once. Load weights onto `device` ("cuda" or "cpu")."""
+        self.tau = max(1e-3, float(tau))
         # Strict latency guard: enforce 1 CPU thread to avoid competing with ViZDoom engine
         if device == "cpu":
             torch.set_num_threads(1)
@@ -150,11 +151,16 @@ class DoomAgent:
         )
 
         # Logits of shape (1, 9) -> (9,)
-        logits_arr = logits.squeeze(0).cpu().numpy().astype(np.float32)
+        logits_arr = np.nan_to_num(
+            logits.squeeze(0).cpu().numpy().astype(np.float32),
+            nan=0.0,
+            posinf=20.0,
+            neginf=-20.0,
+        )
 
-        # 3. Low-temperature Bernoulli sampling (tau = 0.85)
+        # 3. Low-temperature Bernoulli sampling (tau)
         # Prevents freezing in limit cycles while maintaining high fidelity to trained weights
-        tau = 0.85
+        tau = self.tau
         probs = 1.0 / (1.0 + np.exp(-np.clip(logits_arr / tau, -20.0, 20.0)))
         rand_vals = self.rng.random(len(probs))
         action = (rand_vals < probs).astype(np.int8)
