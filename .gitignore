@@ -230,3 +230,7 @@ data/demos/
 tmp_wads/
 .venv/
 _vizdoom/
+
+# Video / Replays
+*.mp4
+*.avi
