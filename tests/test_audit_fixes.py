@@ -370,3 +370,14 @@ def test_idle_wall_shot_and_weapon_swap_penalties() -> None:
     # Turning while enemy IS visible is NOT penalized
     shaper.step(p0, p1, act_turn, info={"enemy_visible": True, "has_ammo": True})
     assert shaper.last_components.get("wall_spin") == pytest.approx(0.0, abs=1e-6)
+
+    # Key approach & locked door without key
+    shaper_k = RewardShaper({"key_approach": 1.5, "locked_door_no_key": -0.12})
+    shaper_k.reset([])
+    act_noop = np.zeros(9, dtype=np.int8)
+    shaper_k.step(p0, p1, act_noop, info={"key_dist": 0.40, "locked_door_blocked": False})
+    assert shaper_k.last_components.get("key_approach") == pytest.approx(0.0, abs=1e-6)
+    shaper_k.step(p0, p1, act_noop, info={"key_dist": 0.30, "locked_door_blocked": False})
+    assert shaper_k.last_components.get("key_approach") == pytest.approx(0.15, abs=1e-6)
+    shaper_k.step(p0, p1, act_noop, info={"key_dist": None, "locked_door_blocked": True})
+    assert shaper_k.last_components.get("locked_door_no_key") == pytest.approx(-0.12, abs=1e-6)
