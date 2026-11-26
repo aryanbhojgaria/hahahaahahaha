@@ -152,3 +152,13 @@ def test_mapgen_all_tiers_load_and_step(tmp_path: Path, tier: int) -> None:
                 break
     finally:
         env.close()
+
+
+def test_eval_suite_loads_all_entries_including_freedoom2() -> None:
+    """Verify eval_suite.json loads all 24 procedural WADs + 3 freedoom2 maps and paths exist."""
+    from training.scorer.eval_suite import load_eval_suite_from_json
+
+    specs = load_eval_suite_from_json(REPO_ROOT / "training" / "scorer" / "eval_suite.json")
+    assert len(specs) == 27
+    for s in specs:
+        assert Path(s.wad_path).exists(), f"Missing WAD: {s.wad_path}"

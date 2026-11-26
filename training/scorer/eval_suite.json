@@ -262,5 +262,35 @@
     "sha256": "384a4089a2050df25c2a7f3eec210406cab33b0d18e47ae33693015dfee012bd",
     "source": "procedural_heldout",
     "split": "heldout"
+  },
+  {
+    "id": "freedoom2_map01",
+    "wad": "freedoom2.wad",
+    "map_name": "MAP01",
+    "tier": 2,
+    "episode_ticks": 2100,
+    "seed": 2001,
+    "source": "freedoom2",
+    "split": "heldout"
+  },
+  {
+    "id": "freedoom2_map02",
+    "wad": "freedoom2.wad",
+    "map_name": "MAP02",
+    "tier": 3,
+    "episode_ticks": 3000,
+    "seed": 2002,
+    "source": "freedoom2",
+    "split": "heldout"
+  },
+  {
+    "id": "freedoom2_map03",
+    "wad": "freedoom2.wad",
+    "map_name": "MAP03",
+    "tier": 4,
+    "episode_ticks": 4200,
+    "seed": 2003,
+    "source": "freedoom2",
+    "split": "heldout"
   }
 ]
