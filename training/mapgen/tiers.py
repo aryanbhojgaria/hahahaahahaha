@@ -14,6 +14,7 @@ and walkover exit alcoves with:
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import shutil
@@ -55,9 +56,26 @@ KEY_SPECS = (
     {"thing_type": 6, "lock": 131, "door_tex": "DOORYEL", "name": "yellow"},
 )
 
-ENEMY_WEAK = (3004, 9)           # Zombieman, ShotgunGuy
-ENEMY_MID = (3001, 3002, 65)     # Imp, Demon, ChaingunGuy
-ENEMY_HEAVY = (3001, 3002, 3005) # Imp, Demon, Cacodemon
+ENEMY_WEAK = (3004, 9)            # Zombieman, ShotgunGuy
+ENEMY_MID = (3001, 3002, 65)      # Imp, Demon, ChaingunGuy
+ENEMY_HEAVY = (3001, 3002, 3005)  # Imp, Demon, Cacodemon
+
+
+class GeneratedMap(tuple):
+    """`(Path, str)` tuple that also implements `os.PathLike` for single-Path callers."""
+
+    def __new__(cls, wad_path: Path, map_name: str = "MAP01") -> "GeneratedMap":
+        return super().__new__(cls, (wad_path, map_name))
+
+    @property
+    def path(self) -> Path:
+        return self[0]
+
+    def __fspath__(self) -> str:
+        return os.fspath(self[0])
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self[0], attr)
 
 
 @dataclass
@@ -131,7 +149,11 @@ def _bfs_reachable(
     return visited
 
 
-def _compile_udmf(sectors: list[_RectSector], portals: dict[tuple[int, int], tuple[str, int, str]], things: list[_Thing]) -> str:
+def _compile_udmf(
+    sectors: list[_RectSector],
+    portals: dict[tuple[int, int], tuple[str, int, str]],
+    things: list[_Thing],
+) -> str:
     """Compile non-overlapping axis-aligned RectSectors + portals into valid ZDoom UDMF TEXTMAP."""
     v_map: dict[tuple[int, int], int] = {}
     vertices: list[tuple[int, int]] = []
@@ -156,7 +178,14 @@ def _compile_udmf(sectors: list[_RectSector], portals: dict[tuple[int, int], tup
         )
         return idx
 
-    def emit_edge(x1: int, y1: int, x2: int, y2: int, sec_right: Optional[_RectSector], sec_left: Optional[_RectSector]) -> None:
+    def emit_edge(
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        sec_right: Optional[_RectSector],
+        sec_left: Optional[_RectSector],
+    ) -> None:
         if sec_right is None and sec_left is None:
             return
         if sec_right is not None and sec_left is None:
@@ -174,12 +203,10 @@ def _compile_udmf(sectors: list[_RectSector], portals: dict[tuple[int, int], tup
             )
             return
 
-        # Two sectors meet along this edge
         assert sec_right is not None and sec_left is not None
         pair = (min(sec_right.sid, sec_left.sid), max(sec_right.sid, sec_left.sid))
         pinfo = portals.get(pair)
         if pinfo is None:
-            # Should not occur with gap spacing, but fallback safely to open twosided wall
             pinfo = ("open", 0, "-")
 
         # Ensure sidefront is the room (and sideback is door/exit) when one side is door or exit
@@ -213,7 +240,6 @@ def _compile_udmf(sectors: list[_RectSector], portals: dict[tuple[int, int], tup
                 f"twosided = true; special = 243; playercross = true; }}"
             )
         else:
-            # Open threshold; populate upper/lower textures if heights differ
             top_tex = front_sec.tex_wall if front_sec.ceil_h != back_sec.ceil_h else "-"
             bot_tex = front_sec.tex_wall if front_sec.floor_h != back_sec.floor_h else "-"
             s_front = add_side(front_sec.sid, tex_top=top_tex, tex_bot=bot_tex)
@@ -234,7 +260,6 @@ def _compile_udmf(sectors: list[_RectSector], portals: dict[tuple[int, int], tup
                 continue
             west = next((s for s in relevant if s.x1 == x and s.y0 <= ya and yb <= s.y1), None)
             east = next((s for s in relevant if s.x0 == x and s.y0 <= ya and yb <= s.y1), None)
-            # Going DOWN (x, yb) -> (x, ya): RIGHT is West (-x), LEFT is East (+x)
             emit_edge(x, yb, x, ya, west, east)
 
     # Split horizontal edges at each y
@@ -248,7 +273,6 @@ def _compile_udmf(sectors: list[_RectSector], portals: dict[tuple[int, int], tup
                 continue
             south = next((s for s in relevant if s.y1 == y and s.x0 <= xa and xb <= s.x1), None)
             north = next((s for s in relevant if s.y0 == y and s.x0 <= xa and xb <= s.x1), None)
-            # Going RIGHT (xa, y) -> (xb, y): RIGHT is South (-y), LEFT is North (+y)
             emit_edge(xa, y, xb, y, south, north)
 
     lines_out = ['namespace = "zdoom";']
@@ -276,16 +300,20 @@ class MapGen:
     def sample(
         tier: int,
         knobs: Optional[dict[str, Any]] = None,
-        seed: int = 0,
+        seed: Optional[int] = 0,
         scaffolding_alpha: float = 0.0,
-    ) -> tuple[Path, str]:
-        """Generate a BFS-verified ZDoom UDMF WAD and return `(wad_path, 'MAP01')`."""
+        *,
+        out_dir: Optional[str | Path] = None,
+    ) -> GeneratedMap:
+        """Generate a BFS-verified ZDoom UDMF WAD and return `GeneratedMap(wad_path, 'MAP01')`."""
         tier_i = int(tier)
         if tier_i not in (1, 2, 3, 4):
             raise ValueError(f"tier must be in {{1, 2, 3, 4}}, got {tier}")
         tier = tier_i
         k = dict(knobs or {})
         alpha = max(0.0, min(1.0, float(scaffolding_alpha)))
+        if seed is None:
+            seed = int(np.random.default_rng().integers(100_000, 1_000_000))
         rng = np.random.default_rng(int(seed) & 0xFFFFFFFF)
 
         scenario = str(k.get("scenario") or rng.choice(TIER_SCENARIOS[tier]))
@@ -302,7 +330,6 @@ class MapGen:
         else:
             room_size = int(k.get("cell_size", int(rng.integers(192, 353))))
             corridor_w = int(k.get("corridor_w", int(rng.choice([64, 96, 128]))))
-        # Ensure room_size >= corridor_w + 32 and multiple of 16
         room_size = max(160, (room_size // 16) * 16)
         corridor_w = min(room_size - 32, max(64, (corridor_w // 16) * 16))
         gap = 64
@@ -316,8 +343,8 @@ class MapGen:
         num_rooms = int(k.get("num_rooms", max(2 if tier > 1 else 1, default_rooms + int(rng.integers(-1, 2)))))
         if scenario == "open_arena" and tier == 1:
             num_rooms = max(1, min(3, num_rooms))
-        if scenario == "branching_maze":
-            num_rooms = max(4, num_rooms)
+        if scenario in ("branching_maze", "multi_room_doors"):
+            num_rooms = max(3, num_rooms)
         if tier >= 3:
             num_rooms = max(4, num_rooms)
 
@@ -331,14 +358,11 @@ class MapGen:
         ammo_mult = float(k.get("ammo_mult", 0.45 if scenario == "scarce_ammo" else 1.0))
 
         # --- Build connected macro-grid room graph ---
-        # Nodes are integer macro-grid coords (gx, gy).
         nodes: list[tuple[int, int]] = [(0, 0)]
         occupied = {(0, 0): 0}
-        edges: list[tuple[int, int]] = []  # (u, v) tree + optional loop edges
+        edges: list[tuple[int, int]] = []
 
-        # Special 2x2 ring pillar layout for open_arena when num_rooms >= 4 or requested
         if scenario == "open_arena" and tier == 1 and num_rooms == 1:
-            # Single large hall
             pass
         else:
             dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
@@ -346,7 +370,6 @@ class MapGen:
                 if scenario == "branching_maze":
                     parent_idx = int(rng.integers(0, len(nodes)))
                 else:
-                    # Prefer growing outward or branching moderately
                     parent_idx = len(nodes) - 1 if rng.random() < 0.65 else int(rng.integers(0, len(nodes)))
                 px, py = nodes[parent_idx]
                 perm = rng.permutation(4)
@@ -362,7 +385,6 @@ class MapGen:
                         added = True
                         break
                 if not added:
-                    # Try any node with a free neighbor
                     free_found = False
                     for pi in rng.permutation(len(nodes)):
                         px2, py2 = nodes[int(pi)]
@@ -380,13 +402,11 @@ class MapGen:
                     if not free_found:
                         break
 
-        # Build tree adjacency to compute distances and guarantee a clean key->lock DAG
         tree_adj: dict[int, list[int]] = {i: [] for i in range(len(nodes))}
         for u, v in edges:
             tree_adj[u].append(v)
             tree_adj[v].append(u)
 
-        # Find farthest node from start (0) for exit_room
         dist = {0: 0}
         parent_map = {0: -1}
         q = deque([0])
@@ -406,25 +426,20 @@ class MapGen:
             cur = parent_map[cur]
         path_to_exit.reverse()
 
-        # Assign locks & keycard rooms for Tier 3 & Tier 4 (verified solvable!)
         num_locks = 0
         if tier == 3 or scenario == "keycard_progression":
             num_locks = 1 if len(nodes) >= 3 else 0
         elif tier == 4:
             num_locks = 2 if len(nodes) >= 6 else (1 if len(nodes) >= 3 else 0)
 
-        # Ensure at least one branch node off the locked edge for the keycard
         locked_edges: dict[tuple[int, int], dict[str, Any]] = {}
         key_placements: list[tuple[int, dict[str, Any]]] = []
 
         if num_locks >= 1 and len(path_to_exit) >= 2:
-            # Lock the final edge entering exit_room (or an intermediate edge on path_to_exit)
-            # First key can go in any node NOT behind the locked edge!
             lock_u, lock_v = path_to_exit[-2], path_to_exit[-1]
             spec1 = KEY_SPECS[int(rng.integers(0, len(KEY_SPECS)))]
             edge_key1 = (min(lock_u, lock_v), max(lock_u, lock_v))
 
-            # Find nodes reachable from 0 without crossing edge_key1
             adj_no_lock: dict[int, list[tuple[int, int]]] = {i: [] for i in range(len(nodes))}
             for u, v in edges:
                 ek = (min(u, v), max(u, v))
@@ -433,18 +448,15 @@ class MapGen:
                     adj_no_lock[v].append((u, 0))
             pre_lock_nodes = sorted(_bfs_reachable(0, adj_no_lock, set()) - {0})
             if pre_lock_nodes:
-                # Pick farthest pre-lock node (ideally off the direct path)
                 key_room1 = max(pre_lock_nodes, key=lambda n: (n not in path_to_exit, dist[n]))
                 locked_edges[edge_key1] = spec1
                 key_placements.append((key_room1, spec1))
 
-                # Optional second lock on Tier 4 if path_to_exit has >= 4 rooms
                 if num_locks == 2 and len(path_to_exit) >= 4:
                     lock2_u, lock2_v = path_to_exit[-3], path_to_exit[-2]
                     edge_key2 = (min(lock2_u, lock2_v), max(lock2_u, lock2_v))
                     rem_specs = [sp for sp in KEY_SPECS if sp["lock"] != spec1["lock"]]
                     spec2 = rem_specs[int(rng.integers(0, len(rem_specs)))]
-                    # Nodes reachable from 0 without crossing edge_key2 or edge_key1
                     adj_pre2: dict[int, list[tuple[int, int]]] = {i: [] for i in range(len(nodes))}
                     for u, v in edges:
                         ek = (min(u, v), max(u, v))
@@ -453,13 +465,10 @@ class MapGen:
                             adj_pre2[v].append((u, 0))
                     pre2_nodes = sorted(_bfs_reachable(0, adj_pre2, set()) - {0})
                     if pre2_nodes:
-                        # Put spec2 (earlier lock) in pre2_nodes, and move spec1 (final lock) into lock2_v or pre2_nodes!
                         key_room2 = max(pre2_nodes, key=lambda n: (n != key_room1, n not in path_to_exit, dist[n]))
                         locked_edges[edge_key2] = spec2
-                        # Place spec1 in lock2_v (between lock2 and lock1) so progression is strictly sequential!
                         key_placements = [(key_room2, spec2), (lock2_v, spec1)]
 
-        # Optional extra loop edge in open_arena / branching_maze ONLY among unlocked pre-lock components
         if scenario in ("open_arena", "branching_maze") and len(nodes) >= 4 and len(locked_edges) == 0:
             for u in range(len(nodes)):
                 ux, uy = nodes[u]
@@ -470,7 +479,6 @@ class MapGen:
                         tree_adj[u].append(v)
                         tree_adj[v].append(u)
 
-        # --- Build Sector Rectangles & Portals ---
         sectors: list[_RectSector] = []
         portals: dict[tuple[int, int], tuple[str, int, str]] = {}
         room_sector_ids: dict[int, int] = {}
@@ -485,7 +493,6 @@ class MapGen:
             y0 = gy * stride
             x1 = x0 + room_size
             y1 = y0 + room_size
-            # Safe step height variation <= 16 units (0 for start room)
             fl_h = 0 if nid == 0 else int(rng.choice([0, 0, 8, 16]))
             cl_h = max(fl_h + 112, base_ceil + int(rng.choice([0, 16, 32])))
             lt = max(112, min(232, base_light + int(rng.integers(-24, 25))))
@@ -506,9 +513,9 @@ class MapGen:
             sectors.append(sec)
             room_sector_ids[nid] = sec.sid
 
-        # Build connector / door sectors along edges
         verify_adj: dict[int, list[tuple[int, int]]] = {i: [] for i in range(len(nodes))}
-        for u, v in edges:
+        has_normal_door = False
+        for edge_idx, (u, v) in enumerate(edges):
             ux, uy = nodes[u]
             vx, vy = nodes[v]
             su = sectors[room_sector_ids[u]]
@@ -516,7 +523,6 @@ class MapGen:
             ek = (min(u, v), max(u, v))
             lock_spec = locked_edges.get(ek)
 
-            # Decide connector type: locked door, normal door, or open corridor
             if lock_spec is not None:
                 is_door = True
                 lock_num = int(lock_spec["lock"])
@@ -528,21 +534,23 @@ class MapGen:
             else:
                 door_prob = 0.75 if (tier >= 2 or scenario == "multi_room_doors") else 0.35
                 is_door = bool(rng.random() < door_prob)
+                if scenario == "multi_room_doors" and not has_normal_door and edge_idx == len(edges) - 1:
+                    is_door = True
                 lock_num = 0
                 door_tex = "BIGDOOR2"
 
-            # Scaffolding: at high alpha, open/unlock a fraction of non-final doors
+            if is_door and lock_num == 0:
+                has_normal_door = True
+
             scaff_open = False
             if is_door and alpha > 0.0 and lock_num == 0 and rng.random() < (0.5 * alpha):
                 scaff_open = True
             elif is_door and alpha > 0.5 and lock_num > 0 and rng.random() < (0.35 * (alpha - 0.5) * 2.0):
-                # Only unlock extra doors if scaffolding_alpha > 0.5, never at alpha=0.0
                 lock_num = 0
                 door_tex = "BIGDOOR2"
                 scaff_open = True
 
             if ux != vx:
-                # Horizontal neighbor
                 x_lo = min(ux, vx) * stride + room_size
                 x_hi = x_lo + gap
                 cy = uy * stride + room_size // 2
@@ -550,7 +558,6 @@ class MapGen:
                 y_lo = cy - cw // 2
                 y_hi = y_lo + cw
             else:
-                # Vertical neighbor
                 y_lo = min(uy, vy) * stride + room_size
                 y_hi = y_lo + gap
                 cx = ux * stride + room_size // 2
@@ -611,19 +618,17 @@ class MapGen:
         if exit_room not in final_reach:
             raise RuntimeError(f"Generated map seed={seed} tier={tier} failed BFS reachability check")
 
-        # --- Attach Walkover Exit Alcove to an exposed exterior wall of exit_room ---
+        # --- Attach Walkover Exit Alcove ---
         ex_gx, ex_gy = nodes[exit_room]
         ex_sec = sectors[room_sector_ids[exit_room]]
         exit_w = 96 if room_size >= 160 else 64
         exit_d = 64
-        # Pick any free cardinal direction around exit_room
         chosen_dir = None
         for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1)):
             if (ex_gx + dx, ex_gy + dy) not in occupied:
                 chosen_dir = (dx, dy)
                 break
         if chosen_dir is None:
-            # Extremely rare surrounded cell: attach to node with exposed wall
             for nid_cand in reversed(path_to_exit):
                 cgx, cgy = nodes[nid_cand]
                 for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1)):
@@ -669,12 +674,11 @@ class MapGen:
         sectors.append(exit_alcove)
         portals[(min(ex_sec.sid, exit_alcove.sid), max(ex_sec.sid, exit_alcove.sid))] = ("exit", 0, "-")
 
-        # --- Populate Things (Player, Keys, Weapons, Health, Ammo, Enemies) ---
+        # --- Populate Things ---
         things: list[_Thing] = []
         s0 = sectors[room_sector_ids[0]]
         p_x = 0.5 * (s0.x0 + s0.x1)
         p_y = 0.5 * (s0.y0 + s0.y1)
-        # Aim player generally toward first neighbor if present
         p_angle = 0
         if tree_adj[0]:
             nb = tree_adj[0][0]
@@ -690,49 +694,45 @@ class MapGen:
                 p_angle = 270
         things.append(_Thing(p_x, p_y, p_angle, 1))
 
-        # Place weapon in start room for non-scarce tiers
         if (tier >= 2 or scenario in ("open_arena", "dense_waves")) and scenario != "scarce_ammo":
             w_type = 2001 if rng.random() < 0.75 else 2002
             things.append(_Thing(p_x + 32.0, p_y, 0, w_type))
             things.append(_Thing(p_x - 32.0, p_y, 0, 2008 if w_type == 2001 else 2007))
 
-        # Keycard placements
         for kr, spec in key_placements:
             ks = sectors[room_sector_ids[kr]]
             things.append(_Thing(0.5 * (ks.x0 + ks.x1), 0.5 * (ks.y0 + ks.y1), 0, int(spec["thing_type"])))
 
-        # Enemies & pickups across rooms
         for nid in range(len(nodes)):
             rs = sectors[room_sector_ids[nid]]
             cx = 0.5 * (rs.x0 + rs.x1)
             cy = 0.5 * (rs.y0 + rs.y1)
             margin = max(40.0, 0.25 * room_size)
 
-            # In single-room Tier 1, still spawn enemies away from player
             if nid == 0 and len(nodes) > 1:
                 if alpha > 0.0 and rng.random() < alpha:
                     things.append(_Thing(cx, cy - margin * 0.5, 0, 2011))
                 continue
 
-            # Determine enemy count in this room
-            n_en = int(rng.poisson(max(0.5, enemies_per_room)))
-            if nid == 0 and len(nodes) == 1:
-                n_en = max(1, n_en)
-            if scenario == "dense_waves":
-                n_en = max(2, n_en)
-            n_en = min(6, n_en)
+            if "enemies_per_room" in k and float(k["enemies_per_room"]) <= 0.0:
+                n_en = 0
+            else:
+                n_en = int(rng.poisson(max(0.5, enemies_per_room)))
+                if nid == 0 and len(nodes) == 1:
+                    n_en = max(1, n_en)
+                if scenario == "dense_waves":
+                    n_en = max(2, n_en)
+                n_en = min(6, n_en)
 
             pool = ENEMY_WEAK if tier == 1 else (ENEMY_WEAK + ENEMY_MID if tier <= 2 else ENEMY_MID + ENEMY_HEAVY)
             for _ in range(n_en):
                 ex = float(rng.uniform(rs.x0 + margin, rs.x1 - margin))
                 ey = float(rng.uniform(rs.y0 + margin, rs.y1 - margin))
-                # Keep safe distance from player spawn
                 if nid == 0 and math.hypot(ex - p_x, ey - p_y) < 96.0:
                     ex = rs.x1 - margin
                 etype = int(rng.choice(pool))
                 things.append(_Thing(ex, ey, int(rng.integers(0, 360)), etype))
 
-            # Pickups (scaled by ammo_mult + scaffolding_alpha)
             if rng.random() < min(1.0, 0.65 * ammo_mult + 0.4 * alpha):
                 ix = float(rng.uniform(rs.x0 + margin, rs.x1 - margin))
                 iy = float(rng.uniform(rs.y0 + margin, rs.y1 - margin))
@@ -742,7 +742,7 @@ class MapGen:
             if scenario == "scarce_ammo" and rng.random() < 0.5:
                 bx = float(rng.uniform(rs.x0 + margin, rs.x1 - margin))
                 by = float(rng.uniform(rs.y0 + margin, rs.y1 - margin))
-                things.append(_Thing(bx, by, 0, 2035))  # ExplosiveBarrel
+                things.append(_Thing(bx, by, 0, 2035))
 
         # --- Apply Global Rotation & Translation (Zero Fixed Coordinates!) ---
         for sec in sectors:
@@ -760,11 +760,11 @@ class MapGen:
 
         textmap = _compile_udmf(sectors, portals, things)
 
-        out_dir = Path(k.get("out_dir", "tmp_wads"))
-        out_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = Path(out_dir) if out_dir is not None else Path(k.get("out_dir", "tmp_wads"))
+        target_dir.mkdir(parents=True, exist_ok=True)
         tag = f"t{tier}_{scenario}_s{int(seed)}_a{int(round(alpha * 100))}_p{os.getpid()}"
-        raw_wad = out_dir / f"{tag}_raw.wad"
-        final_wad = out_dir / f"{tag}.wad"
+        raw_wad = target_dir / f"{tag}_raw.wad"
+        final_wad = target_dir / f"{tag}.wad"
 
         write_wad(
             raw_wad,
@@ -785,8 +785,11 @@ class MapGen:
             )
             if proc.returncode == 0 and final_wad.is_file():
                 raw_wad.unlink(missing_ok=True)
-                return final_wad, "MAP01"
+                return GeneratedMap(final_wad, "MAP01")
 
-        # Fallback if zdbsp not present (ViZDoom/ZDoom builds UDMF nodes automatically)
         raw_wad.replace(final_wad)
-        return final_wad, "MAP01"
+        return GeneratedMap(final_wad, "MAP01")
+
+
+def wad_sha256(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()

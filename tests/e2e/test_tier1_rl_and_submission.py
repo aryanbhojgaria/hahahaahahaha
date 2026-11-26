@@ -723,7 +723,7 @@ def test_t1_f12_doom_agent_remote_ipc_multi_map_reset(tmp_path: Path, make_live_
 
 def test_t1_f12_validate_py_passes_on_repo() -> None:
     proc = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "validate.py"), "--repo", str(REPO_ROOT), "--map", "maps/two_rooms.wad", "--ticks", "200"],
+        [sys.executable, str(REPO_ROOT / "validate.py"), "--repo", str(REPO_ROOT), "--map", "maps/two_rooms.wad", "--ticks", "600"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

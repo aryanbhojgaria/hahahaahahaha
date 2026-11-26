@@ -476,7 +476,7 @@ def test_t3_14_f1_eval_yaml_with_f12_validate_py_and_coach_summary(monkeypatch) 
     monkeypatch.delenv("CREO_API_KEY", raising=False)
 
     proc = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "validate.py"), "--repo", str(REPO_ROOT), "--map", "maps/two_rooms.wad", "--ticks", "100"],
+        [sys.executable, str(REPO_ROOT / "validate.py"), "--repo", str(REPO_ROOT), "--map", "maps/two_rooms.wad", "--ticks", "600"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

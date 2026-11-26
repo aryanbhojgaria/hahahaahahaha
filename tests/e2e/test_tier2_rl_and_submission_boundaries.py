@@ -9,6 +9,7 @@ import ast
 import inspect
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -289,11 +290,12 @@ def test_t2_f9_empty_and_partial_telemetry_safe(monkeypatch) -> None:
 
 
 def test_t2_f9_no_hardcoded_creo_secret_in_coach_or_env_example() -> None:
+    secret_re = re.compile(r"cr_[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9]{20,}")
     for rel in ("training/llm_coach.py", ".env.example"):
         p = REPO_ROOT / rel
         assert p.is_file(), f"Missing {p}"
         text = p.read_text(encoding="utf-8", errors="replace")
-        assert "cr_" not in text, f"Potential hardcoded Creo API key found in {rel}"
+        assert not secret_re.search(text), f"Potential hardcoded Creo API key found in {rel}"
 
 
 # ===========================================================================

@@ -2,15 +2,33 @@
 
 Uses ONLY relative deltas from `env.privileged_state()` and translation-invariant
 point-in-polygon lookups on `env.sector_polygons()`. Zero fixed world XYZ assumptions.
-Matches planning/Schema.md §2.4 and Design.md §3.
+Matches planning/Schema.md §2.4 and Design.md §3, and supports both dict-delta and DoomEnv callers.
 """
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
+
+
+@dataclass
+class RewardWeights:
+    exit_base: float = 15.0
+    exit_speed_bonus: float = 3.0
+    new_sector: float = 0.40
+    key_pickup: float = 4.00
+    door_open: float = 0.60
+    locked_door_unlock: float = 5.00
+    kill: float = 1.00
+    item_pickup: float = 0.15
+    damage_per_hp: float = -0.02
+    death: float = -4.00
+    door_reversal_bounce: float = -0.30
+    stuck_wall_scrape: float = -0.02
+    step_cost: float = -0.002
 
 
 def _point_in_segments(x: float, y: float, segs: np.ndarray) -> bool:
@@ -32,21 +50,36 @@ def _point_in_segments(x: float, y: float, segs: np.ndarray) -> bool:
 class RewardShaper:
     """Dense coordinate-free training reward shaper built over doom_env privileged deltas."""
 
-    def __init__(self, weights: Optional[dict[str, float]] = None) -> None:
-        w = dict(weights or {})
-        self.w_exit = float(w.get("exit", 15.0))
-        self.w_exit_speed = float(w.get("exit_speed", 3.0))
-        self.w_sector = float(w.get("sector", 0.40))
-        self.w_key = float(w.get("key", 4.00))
-        self.w_door = float(w.get("door", 0.60))
-        self.w_locked_door = float(w.get("locked_door", 5.00))
-        self.w_kill = float(w.get("kill", 1.00))
-        self.w_item = float(w.get("item", 0.15))
-        self.w_damage = float(w.get("damage", -0.02))
-        self.w_death = float(w.get("death", -4.00))
-        self.w_door_bounce = float(w.get("door_bounce", -0.30))
-        self.w_stuck = float(w.get("stuck", -0.02))
-        self.w_step = float(w.get("step", -0.002))
+    def __init__(self, weights: Optional[dict[str, float] | RewardWeights] = None) -> None:
+        if isinstance(weights, RewardWeights):
+            self.w_exit = float(weights.exit_base)
+            self.w_exit_speed = float(weights.exit_speed_bonus)
+            self.w_sector = float(weights.new_sector)
+            self.w_key = float(weights.key_pickup)
+            self.w_door = float(weights.door_open)
+            self.w_locked_door = float(weights.locked_door_unlock)
+            self.w_kill = float(weights.kill)
+            self.w_item = float(weights.item_pickup)
+            self.w_damage = float(weights.damage_per_hp)
+            self.w_death = float(weights.death)
+            self.w_door_bounce = float(weights.door_reversal_bounce)
+            self.w_stuck = float(weights.stuck_wall_scrape)
+            self.w_step = float(weights.step_cost)
+        else:
+            w = dict(weights or {})
+            self.w_exit = float(w.get("exit", 15.0))
+            self.w_exit_speed = float(w.get("exit_speed", 3.0))
+            self.w_sector = float(w.get("sector", 0.40))
+            self.w_key = float(w.get("key", 4.00))
+            self.w_door = float(w.get("door", 0.60))
+            self.w_locked_door = float(w.get("locked_door", 5.00))
+            self.w_kill = float(w.get("kill", 1.00))
+            self.w_item = float(w.get("item", 0.15))
+            self.w_damage = float(w.get("damage", -0.02))
+            self.w_death = float(w.get("death", -4.00))
+            self.w_door_bounce = float(w.get("door_bounce", -0.30))
+            self.w_stuck = float(w.get("stuck", -0.02))
+            self.w_step = float(w.get("step", -0.002))
 
         self._sectors: list[tuple[int, float, float, float, float, np.ndarray, float]] = []
         self.visited_sectors: set[int] = set()
@@ -57,13 +90,28 @@ class RewardShaper:
         self._exit_awarded: bool = False
         self._death_penalized: bool = False
         self._spawn_seeded: bool = False
+        self._env_prev_priv: Optional[dict[str, Any]] = None
         self.last_components: dict[str, float] = {}
 
-    def reset(self, sector_polygons: Optional[list[tuple[int, np.ndarray]]] = None) -> None:
-        """Initialize per-episode sector geometry and episodic trackers."""
+    @property
+    def visited_sector_count(self) -> int:
+        return len(self.visited_sectors)
+
+    def reset(self, sector_polygons: Optional[Any] = None) -> None:
+        """Initialize per-episode sector geometry and episodic trackers.
+
+        Accepts either `sector_polygons: list[tuple[int, np.ndarray]] | None` (Schema.md §2.4)
+        or a `DoomEnv` instance directly.
+        """
+        env_obj = None
+        raw_polys = sector_polygons
+        if sector_polygons is not None and hasattr(sector_polygons, "sector_polygons") and hasattr(sector_polygons, "privileged_state"):
+            env_obj = sector_polygons
+            raw_polys = env_obj.sector_polygons()
+
         self._sectors = []
-        if sector_polygons:
-            for sid, segs_raw in sector_polygons:
+        if raw_polys:
+            for sid, segs_raw in raw_polys:
                 segs = np.asarray(segs_raw, dtype=np.float64)
                 if segs.ndim != 2 or segs.shape[1] != 4 or len(segs) == 0:
                     continue
@@ -83,7 +131,16 @@ class RewardShaper:
         self._exit_awarded = False
         self._death_penalized = False
         self._spawn_seeded = False
+        self._env_prev_priv = None
         self.last_components = {}
+
+        if env_obj is not None:
+            priv0 = env_obj.privileged_state()
+            self._env_prev_priv = priv0
+            spawn_hit = self._find_sector(float(priv0.get("x", 0.0)), float(priv0.get("y", 0.0)))
+            if spawn_hit is not None:
+                self.visited_sectors.add(spawn_hit[0])
+            self._spawn_seeded = True
 
     def _find_sector(self, x: float, y: float) -> Optional[tuple[int, float]]:
         for sid, xmin, xmax, ymin, ymax, segs, weight in self._sectors:
@@ -92,7 +149,7 @@ class RewardShaper:
                     return sid, weight
         return None
 
-    def step(
+    def _compute_step(
         self,
         priv_prev: dict[str, Any],
         priv_now: dict[str, Any],
@@ -129,7 +186,6 @@ class RewardShaper:
             self._exit_awarded = True
 
         # 2. Unique sector discovery (translation-invariant point-in-polygon)
-        # Seed spawn sector from priv_prev on first step so standing still isn't counted as discovery
         if not self._spawn_seeded:
             self._spawn_seeded = True
             spawn_hit = self._find_sector(
@@ -211,7 +267,7 @@ class RewardShaper:
         dy = y_now - float(priv_prev.get("y", 0.0))
         disp = math.hypot(dx, dy)
         moving_fwd = len(act) > 0 and int(act[0]) == 1
-        if moving_fwd and disp < 2.0:
+        if moving_fwd and disp < 2.0 and not bool(priv_now.get("finished", False)):
             self.stuck_steps += 1
         else:
             self.stuck_steps = 0
@@ -220,6 +276,36 @@ class RewardShaper:
 
         self.last_components = comp
         return float(sum(comp.values()))
+
+    def step(
+        self,
+        priv_prev: Any,
+        priv_now: Any,
+        action: Optional[np.ndarray | list[int]] = None,
+        info: Optional[dict[str, Any]] = None,
+    ) -> float | tuple[float, dict[str, float]]:
+        """Compute dense shaping reward.
+
+        Supports both:
+        - `step(priv_prev, priv_now, action, info=None) -> float` (Schema.md §2.4)
+        - `step(env, action) -> tuple[float, dict[str, float]]` (DoomEnv helper)
+        """
+        if action is None and hasattr(priv_prev, "privileged_state"):
+            if self._env_prev_priv is None:
+                raise RuntimeError("Call RewardShaper.reset(env) before step(env, action).")
+            cur_priv = priv_prev.privileged_state()
+            r = self._compute_step(
+                self._env_prev_priv,
+                cur_priv,
+                priv_now,
+                info={"exit_reached": bool(cur_priv.get("exit_reached", False))},
+            )
+            self._env_prev_priv = cur_priv
+            return r, dict(self.last_components)
+
+        if action is None:
+            raise TypeError("RewardShaper.step(priv_prev, priv_now, action, info=None) requires `action`")
+        return self._compute_step(priv_prev, priv_now, action, info=info)
 
 
 def attribute_sector_rewards(
@@ -236,7 +322,6 @@ def attribute_sector_rewards(
     if reward_components is None:
         val = 0.0
     elif isinstance(reward_components, dict):
-        # Sum progression/exploration/combat signals (exclude constant step cost)
         val = float(
             sum(
                 float(v)

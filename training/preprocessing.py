@@ -1,13 +1,13 @@
 """Coordinate-free ego-centric observation preprocessing and 360-degree scan-matching odometry grid.
 
 Strictly ego-centric and translation/rotation-invariant (zero fixed world XYZ assumptions).
-Matches planning/Schema.md §2.1 and §2.2.
+Matches planning/Schema.md §2.1 and §2.2, and stays compatible with submission/agent.py.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
 import cv2
@@ -17,11 +17,18 @@ import torch
 NUM_RAYS = 64
 MAX_ENTITIES = 32
 GRID_SIZE = 32
+GRID_CHANNELS = 6
 GRID_CENTER = 16
 CELL_SIZE = 48.0
 FRAME_SKIP = 4
 RAY_RANGE = 1024.0
+RGB_HEIGHT = 48
+RGB_WIDTH = 64
+NUM_VITALS_RAW = 17
+NUM_VITALS_PREPROCESSED = 36
+NUM_ACTIONS = 9
 FRONT_RAY_INDICES = (60, 61, 62, 63, 0, 1, 2, 3, 4)
+DOOR_HIT_TYPES = (2, 3)
 
 # Ray angles: index 0 = straight ahead, positive CCW (16 = +90 deg left, 32 = behind, 48 = right)
 _RAY_ANGLES = np.arange(NUM_RAYS, dtype=np.float32) * (2.0 * np.pi / NUM_RAYS)
@@ -33,38 +40,39 @@ _RAY_SIN = np.sin(_RAY_ANGLES)
 class OdomGridState:
     """Persistent per-episode egocentric odometry & action-cooldown state."""
 
-    grid: np.ndarray            # (6, 32, 32) float32
-    prev_ray_dist: np.ndarray   # (64,) float32
-    prev_ray_type: np.ndarray   # (64,) int64
-    prev_action: np.ndarray     # (9,) float32
+    grid: np.ndarray = field(
+        default_factory=lambda: np.zeros((GRID_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+    )
+    prev_ray_dist: np.ndarray = field(
+        default_factory=lambda: np.ones((NUM_RAYS,), dtype=np.float32)
+    )
+    prev_ray_type: np.ndarray = field(
+        default_factory=lambda: np.zeros((NUM_RAYS,), dtype=np.int64)
+    )
+    prev_action: np.ndarray = field(
+        default_factory=lambda: np.zeros((NUM_ACTIONS,), dtype=np.float32)
+    )
     use_cooldown: int = 0
     initialized: bool = False
     last_dtheta: float = 0.0
     use_consumed: bool = False
+    cooldown_pre_armed: bool = False
 
     @classmethod
     def zeros(cls) -> "OdomGridState":
-        return cls(
-            grid=np.zeros((6, GRID_SIZE, GRID_SIZE), dtype=np.float32),
-            prev_ray_dist=np.ones((NUM_RAYS,), dtype=np.float32),
-            prev_ray_type=np.zeros((NUM_RAYS,), dtype=np.int64),
-            prev_action=np.zeros((9,), dtype=np.float32),
-            use_cooldown=0,
-            initialized=False,
-            last_dtheta=0.0,
-            use_consumed=False,
-        )
+        return cls()
 
     def copy(self) -> "OdomGridState":
         return OdomGridState(
             grid=self.grid.copy(),
             prev_ray_dist=self.prev_ray_dist.copy(),
             prev_ray_type=self.prev_ray_type.copy(),
-            prev_action=self.prev_action.copy(),
+            prev_action=np.asarray(self.prev_action, dtype=np.float32).copy(),
             use_cooldown=int(self.use_cooldown),
             initialized=bool(self.initialized),
             last_dtheta=float(self.last_dtheta),
             use_consumed=bool(self.use_consumed),
+            cooldown_pre_armed=bool(self.cooldown_pre_armed),
         )
 
 
@@ -80,6 +88,7 @@ class ModelInputs:
     rgb_depth: torch.Tensor   # (B, 4, 48, 64) float32
     grid: torch.Tensor        # (B, 6, 32, 32) float32
     action_mask: torch.Tensor # (B, 9) bool
+    d_theta: Optional[torch.Tensor] = None  # (B,) float32 optional odometry yaw delta
 
     def to(self, device: torch.device | str) -> "ModelInputs":
         return ModelInputs(
@@ -91,10 +100,11 @@ class ModelInputs:
             rgb_depth=self.rgb_depth.to(device),
             grid=self.grid.to(device),
             action_mask=self.action_mask.to(device),
+            d_theta=self.d_theta.to(device) if self.d_theta is not None else None,
         )
 
     def as_dict(self) -> dict[str, torch.Tensor]:
-        return {
+        out: dict[str, torch.Tensor] = {
             "rays": self.rays,
             "ent_feats": self.ent_feats,
             "ent_types": self.ent_types,
@@ -104,13 +114,16 @@ class ModelInputs:
             "grid": self.grid,
             "action_mask": self.action_mask,
         }
+        if self.d_theta is not None:
+            out["d_theta"] = self.d_theta
+        return out
 
 
 def stack_model_inputs(items: Sequence[ModelInputs], dim: int = 0) -> ModelInputs:
-    """Stack or concatenate a sequence of ModelInputs along `dim`."""
+    """Concatenate a sequence of ModelInputs along `dim`."""
     if not items:
         raise ValueError("Cannot stack empty sequence of ModelInputs")
-    # If each item has leading B=1 and dim=0, squeeze B=1 or stack along dim
+    has_dtheta = all(x.d_theta is not None for x in items)
     return ModelInputs(
         rays=torch.cat([x.rays for x in items], dim=dim),
         ent_feats=torch.cat([x.ent_feats for x in items], dim=dim),
@@ -120,6 +133,7 @@ def stack_model_inputs(items: Sequence[ModelInputs], dim: int = 0) -> ModelInput
         rgb_depth=torch.cat([x.rgb_depth for x in items], dim=dim),
         grid=torch.cat([x.grid for x in items], dim=dim),
         action_mask=torch.cat([x.action_mask for x in items], dim=dim),
+        d_theta=torch.cat([x.d_theta for x in items if x.d_theta is not None], dim=dim) if has_dtheta else None,
     )
 
 
@@ -143,9 +157,10 @@ def _estimate_dtheta(
     scores: list[float] = []
     valid_counts: list[int] = []
 
+    # When turning CCW by +k bins, world features shift CW by -k indices: curr[i] ~= prev[i + k]
     for k in candidates:
-        shifted_dist = np.roll(prev_ray_dist, k)
-        shifted_static = np.roll(prev_static, k)
+        shifted_dist = np.roll(prev_ray_dist, -k)
+        shifted_static = np.roll(prev_static, -k)
         joint = cur_static & shifted_static
         n_valid = int(joint.sum())
         valid_counts.append(n_valid)
@@ -204,7 +219,6 @@ def _update_egocentric_grid(
     ty = -s * (GRID_CENTER + dy_cells) - c * (GRID_CENTER - dx_cells) + GRID_CENTER
     warp_mat = np.array([[c, -s, tx], [s, c, ty]], dtype=np.float32)
 
-    # Warp (32, 32, 6) in a single OpenCV call for minimal CPU overhead
     hwc = np.transpose(grid, (1, 2, 0))
     warped_hwc = cv2.warpAffine(
         hwc,
@@ -249,12 +263,12 @@ def _pack_rgb_depth(obs: dict[str, Any]) -> np.ndarray:
     if depth.ndim == 3 and depth.shape[-1] == 1:
         depth = depth[..., 0]
 
-    if rgb.shape[:2] != (48, 64):
-        rgb = cv2.resize(rgb, (64, 48), interpolation=cv2.INTER_LINEAR)
-    if depth.shape[:2] != (48, 64):
-        depth = cv2.resize(depth, (64, 48), interpolation=cv2.INTER_LINEAR)
+    if rgb.shape[:2] != (RGB_HEIGHT, RGB_WIDTH):
+        rgb = cv2.resize(rgb, (RGB_WIDTH, RGB_HEIGHT), interpolation=cv2.INTER_LINEAR)
+    if depth.shape[:2] != (RGB_HEIGHT, RGB_WIDTH):
+        depth = cv2.resize(depth, (RGB_WIDTH, RGB_HEIGHT), interpolation=cv2.INTER_LINEAR)
 
-    out = np.empty((4, 48, 64), dtype=np.float32)
+    out = np.empty((4, RGB_HEIGHT, RGB_WIDTH), dtype=np.float32)
     out[:3] = np.transpose(rgb, (2, 0, 1)).astype(np.float32) * (1.0 / 255.0)
     out[3] = depth.astype(np.float32) * (1.0 / 255.0)
     return out
@@ -283,7 +297,7 @@ def _validate_obs_contract(obs: dict[str, Any]) -> None:
         raise ValueError(f"Invalid depth spatial shape {depth_hw}; expected (120, 160) or (48, 64)")
 
     vitals = np.asarray(obs["vitals"])
-    if vitals.shape != (17,):
+    if vitals.shape != (NUM_VITALS_RAW,):
         raise ValueError(f"Invalid vitals shape {vitals.shape}; expected (17,)")
 
     rays = obs["rays"]
@@ -302,10 +316,24 @@ def _validate_obs_contract(obs: dict[str, Any]) -> None:
         raise ValueError("visible_entities['entity_type'] and ['mask'] must have shape (32,)")
 
 
+def compute_action_mask(obs: dict[str, Any], state: OdomGridState) -> np.ndarray:
+    """Compute observation-legal action mask of shape (9,) bool."""
+    mask = np.ones((NUM_ACTIONS,), dtype=bool)
+    if int(state.use_cooldown) > 0:
+        mask[7] = False
+    v = np.asarray(obs.get("vitals", np.zeros(NUM_VITALS_RAW, dtype=np.float32)), dtype=np.float32)
+    if len(v) >= 4:
+        selected_weapon = int(round(float(v[2])))
+        selected_ammo = float(v[3])
+        if selected_weapon > 1 and selected_ammo <= 0.0:
+            mask[6] = False
+    return mask
+
+
 def preprocess(
     obs: dict[str, Any],
     state: Optional[OdomGridState] = None,
-    *,
+    device: torch.device | str = "cpu",
     use_grid: bool = True,
 ) -> tuple[ModelInputs, OdomGridState]:
     """Convert a single raw doom_env observation dict to (ModelInputs, updated OdomGridState).
@@ -340,7 +368,7 @@ def preprocess(
 
     # --- 3. Vitals + Action Context (1, 36) ---
     v = np.asarray(obs["vitals"], dtype=np.float32)
-    vitals_arr = np.zeros((36,), dtype=np.float32)
+    vitals_arr = np.zeros((NUM_VITALS_PREPROCESSED,), dtype=np.float32)
     vitals_arr[0] = np.clip(v[0] / 100.0, 0.0, 2.0)  # health
     vitals_arr[1] = np.clip(v[1] / 100.0, 0.0, 2.0)  # armor
     vitals_arr[2] = np.log1p(np.clip(v[3], 0.0, 500.0)) / 6.2  # selected_weapon_ammo
@@ -352,23 +380,29 @@ def preprocess(
     weapon_idx = max(0, min(7, selected_weapon))
     vitals_arr[16 + weapon_idx] = 1.0
 
-    use_pressed = int(round(float(cur_state.prev_action[7]))) == 1
+    prev_act = np.asarray(cur_state.prev_action, dtype=np.float32).reshape(NUM_ACTIONS)
+    use_pressed = int(round(float(prev_act[7]))) == 1
     current_cooldown = max(0, int(cur_state.use_cooldown))
     next_use_consumed = bool(cur_state.use_consumed)
-    if current_cooldown == 0 and use_pressed and not next_use_consumed:
+
+    if current_cooldown > 0:
+        if not cur_state.cooldown_pre_armed:
+            current_cooldown -= 1
+    elif use_pressed and not next_use_consumed:
         idx = np.asarray(FRONT_RAY_INDICES, dtype=np.int64)
         front_door = bool(np.any(((ray_type[idx] == 2) | (ray_type[idx] == 3)) & (ray_dist[idx] < 0.15)))
         if front_door:
             current_cooldown = 6
             next_use_consumed = True
-    elif not use_pressed:
+
+    if not use_pressed:
         next_use_consumed = False
 
     vitals_arr[24] = min(1.0, float(current_cooldown) / 6.0)
     vitals_arr[25] = 1.0 if float(np.sum(v[8:14])) > 0.5 else 0.0
     selected_ammo = float(v[3])
     vitals_arr[26] = 1.0 if (selected_weapon > 1 and selected_ammo <= 5.0) else 0.0
-    vitals_arr[27:36] = np.asarray(cur_state.prev_action, dtype=np.float32)
+    vitals_arr[27:36] = prev_act
 
     # --- 4. RGB + Depth (1, 4, 48, 64) ---
     rgb_depth_arr = _pack_rgb_depth(obs)
@@ -381,7 +415,7 @@ def preprocess(
                 ray_type=ray_type,
                 prev_ray_dist=cur_state.prev_ray_dist,
                 prev_ray_type=cur_state.prev_ray_type,
-                prev_action=cur_state.prev_action,
+                prev_action=prev_act,
                 num_visible_entities=int(raw_mask.sum()),
             )
         else:
@@ -396,10 +430,10 @@ def preprocess(
         )
     else:
         dtheta = 0.0
-        next_grid = np.zeros((6, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+        next_grid = np.zeros((GRID_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
 
     # --- 6. Observation-Legal Action Mask (1, 9) ---
-    action_mask_arr = np.ones((9,), dtype=bool)
+    action_mask_arr = np.ones((NUM_ACTIONS,), dtype=bool)
     if current_cooldown > 0:
         action_mask_arr[7] = False  # USE masked during cooldown
     if selected_weapon > 1 and selected_ammo <= 0.0:
@@ -409,22 +443,25 @@ def preprocess(
         grid=next_grid,
         prev_ray_dist=ray_dist.copy(),
         prev_ray_type=ray_type.copy(),
-        prev_action=cur_state.prev_action.copy(),
-        use_cooldown=max(0, current_cooldown - 1),
+        prev_action=prev_act.copy(),
+        use_cooldown=current_cooldown,
         initialized=True,
         last_dtheta=float(dtheta),
         use_consumed=next_use_consumed,
+        cooldown_pre_armed=False,
     )
 
+    dev = torch.device(device)
     model_inputs = ModelInputs(
-        rays=torch.from_numpy(np.ascontiguousarray(rays_arr[None, ...])),
-        ent_feats=torch.from_numpy(np.ascontiguousarray(raw_feats[None, ...])),
-        ent_types=torch.from_numpy(np.ascontiguousarray(raw_types[None, ...])),
-        ent_mask=torch.from_numpy(np.ascontiguousarray(raw_mask[None, ...])),
-        vitals=torch.from_numpy(np.ascontiguousarray(vitals_arr[None, ...])),
-        rgb_depth=torch.from_numpy(np.ascontiguousarray(rgb_depth_arr[None, ...])),
-        grid=torch.from_numpy(np.ascontiguousarray(next_grid[None, ...])),
-        action_mask=torch.from_numpy(np.ascontiguousarray(action_mask_arr[None, ...])),
+        rays=torch.from_numpy(np.ascontiguousarray(rays_arr[None, ...])).to(dev),
+        ent_feats=torch.from_numpy(np.ascontiguousarray(raw_feats[None, ...])).to(dev),
+        ent_types=torch.from_numpy(np.ascontiguousarray(raw_types[None, ...])).to(dev),
+        ent_mask=torch.from_numpy(np.ascontiguousarray(raw_mask[None, ...])).to(dev),
+        vitals=torch.from_numpy(np.ascontiguousarray(vitals_arr[None, ...])).to(dev),
+        rgb_depth=torch.from_numpy(np.ascontiguousarray(rgb_depth_arr[None, ...])).to(dev),
+        grid=torch.from_numpy(np.ascontiguousarray(next_grid[None, ...])).to(dev),
+        action_mask=torch.from_numpy(np.ascontiguousarray(action_mask_arr[None, ...])).to(dev),
+        d_theta=torch.tensor([dtheta], dtype=torch.float32, device=dev),
     )
     return model_inputs, next_state
 
@@ -435,7 +472,7 @@ def update_action_state(
     obs: Optional[dict[str, Any]] = None,
 ) -> OdomGridState:
     """Update state with executed `action` and trigger 6-step USE cooldown if facing a door."""
-    act = np.asarray(action, dtype=np.float32).reshape(9)
+    act = np.asarray(action, dtype=np.float32).reshape(NUM_ACTIONS)
     next_state = state.copy()
     next_state.prev_action = act.copy()
 
@@ -448,6 +485,7 @@ def update_action_state(
             front_door = np.any(((r_type[idx] == 2) | (r_type[idx] == 3)) & (r_dist[idx] < 0.15))
             if front_door:
                 next_state.use_cooldown = 6
+                next_state.cooldown_pre_armed = True
     else:
         next_state.use_consumed = False
 

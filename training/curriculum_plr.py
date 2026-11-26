@@ -8,11 +8,15 @@ and held-out evaluation seeds ([1_000, 9_999]). Matches planning/Schema.md §5.2
 from __future__ import annotations
 
 import math
-from typing import Any, Optional, Sequence
+from dataclasses import dataclass
+from typing import Any, Iterator, Optional, Sequence
 
 import numpy as np
 
 from .mapgen.tiers import ALL_SCENARIOS, TIER_SCENARIOS
+
+TRAIN_SEED_MIN = 100_000
+TRAIN_SEED_MAX = 999_999
 
 
 def _sanitize_score(val: Any) -> float:
@@ -27,6 +31,48 @@ def _sanitize_score(val: Any) -> float:
     return max(0.0, f)
 
 
+@dataclass
+class PLREntry:
+    """PLR level descriptor supporting dict access, attribute access, and `(entry, alpha)` unpacking."""
+
+    level_id: str
+    tier: int
+    knobs: dict[str, Any]
+    seed: int
+    score_gae: float = 1.0
+    last_seen_update: int = 0
+    visits: int = 1
+    scaffolding_alpha: float = 0.0
+
+    def __getitem__(self, key: str) -> Any:
+        if hasattr(self, key):
+            return getattr(self, key)
+        raise KeyError(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and hasattr(self, key)
+
+    def __iter__(self) -> Iterator[Any]:
+        # Enables `entry, alpha = plr.sample_level(...)` while `lvl["seed"]` also works directly
+        yield self
+        yield float(self.scaffolding_alpha)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "level_id": self.level_id,
+            "tier": self.tier,
+            "knobs": dict(self.knobs),
+            "seed": self.seed,
+            "score_gae": self.score_gae,
+            "last_seen_update": self.last_seen_update,
+            "visits": self.visits,
+            "scaffolding_alpha": self.scaffolding_alpha,
+        }
+
+
 class PLRBuffer:
     """Self-evolving Prioritized Level Replay buffer across extreme procedural Tiers 1-4."""
 
@@ -34,17 +80,17 @@ class PLRBuffer:
         self,
         capacity: int = 256,
         tier_weights: Sequence[float] = (1.0, 1.5, 2.5, 3.0),
-        seed_min: int = 100_000,
-        seed_max: int = 999_999,
+        seed_min: int = TRAIN_SEED_MIN,
+        seed_max: int = TRAIN_SEED_MAX,
         replay_prob: float = 0.5,
         staleness_coef: float = 0.1,
         temperature: float = 0.1,
         scaffolding_end_step: int = 12_000_000,
         seed: int = 42,
     ) -> None:
-        if seed_min < 100_000:
+        if seed_min < TRAIN_SEED_MIN:
             raise ValueError(
-                f"Training seed_min must be >= 100_000 to stay disjoint from held-out suite, got {seed_min}"
+                f"Training seed_min must be >= {TRAIN_SEED_MIN} to stay disjoint from held-out suite, got {seed_min}"
             )
         self.capacity = max(1, int(capacity))
         self.tier_weights = [float(w) for w in tier_weights]
@@ -61,9 +107,10 @@ class PLRBuffer:
 
         self.entries: list[dict[str, Any]] = []
         self._by_id: dict[str, dict[str, Any]] = {}
+        self._by_seed: dict[int, dict[str, Any]] = {}
         self._used_seeds: set[int] = set()
+        self.update_idx: int = 0
 
-        # Global bounded knob offsets/multipliers and optional direct overrides (tunable by llm_coach.py)
         self.global_knobs: dict[str, Any] = {
             "enemies_per_room_mult": 1.0,
             "ammo_mult": 1.0,
@@ -124,6 +171,19 @@ class PLRBuffer:
             "scenario": scenario,
         }
 
+    @staticmethod
+    def _to_plr_entry(raw: dict[str, Any], alpha: float) -> PLREntry:
+        return PLREntry(
+            level_id=str(raw["level_id"]),
+            tier=int(raw["tier"]),
+            knobs=dict(raw["knobs"]),
+            seed=int(raw["seed"]),
+            score_gae=float(raw["score_gae"]),
+            last_seen_update=int(raw["last_seen_update"]),
+            visits=int(raw["visits"]),
+            scaffolding_alpha=float(alpha),
+        )
+
     def add(self, entry: dict[str, Any]) -> dict[str, Any]:
         """Validate and insert or update a PLR entry, evicting lowest score on capacity overflow."""
         tier = int(entry["tier"])
@@ -151,15 +211,18 @@ class PLRBuffer:
         if level_id in self._by_id:
             existing = self._by_id[level_id]
             existing.update(clean)
+            self._by_seed[seed_val] = existing
             return dict(existing)
 
         if len(self.entries) >= self.capacity:
             evict_idx = int(np.argmin([float(e["score_gae"]) for e in self.entries]))
             removed = self.entries.pop(evict_idx)
             self._by_id.pop(removed["level_id"], None)
+            self._by_seed.pop(int(removed["seed"]), None)
 
         self.entries.append(clean)
         self._by_id[level_id] = clean
+        self._by_seed[seed_val] = clean
         return dict(clean)
 
     insert = add
@@ -190,7 +253,7 @@ class PLRBuffer:
         mix /= mix.sum()
         return mix
 
-    def sample(self, update_idx: int = 0, global_step: int = 0) -> dict[str, Any]:
+    def sample(self, update_idx: int = 0, global_step: int = 0) -> PLREntry:
         """Prioritized sample from stored levels when non-empty; safe fresh fallback when empty."""
         alpha = self.scaffolding_alpha(global_step)
         if len(self.entries) > 0:
@@ -199,46 +262,61 @@ class PLRBuffer:
             entry = self.entries[idx]
             entry["visits"] += 1
             entry["last_seen_update"] = int(update_idx)
-            out = dict(entry)
-            out["knobs"] = dict(entry["knobs"])
-            out["scaffolding_alpha"] = alpha
-            return out
+            return self._to_plr_entry(entry, alpha)
         return self.sample_level(global_step=global_step, update_idx=update_idx)
 
-    def sample_level(self, global_step: int = 0, update_idx: int = 0) -> dict[str, Any]:
+    def sample_level(self, global_step: int = 0, update_idx: Optional[int] = None) -> PLREntry:
         """Training mix: replay stored frontier levels with `eff_replay_p`, else generate fresh level."""
+        u_idx = self.update_idx if update_idx is None else int(update_idx)
         alpha = self.scaffolding_alpha(global_step)
         eff_replay_p = self.replay_prob * min(1.0, len(self.entries) / max(1.0, 0.25 * self.capacity))
         if len(self.entries) > 0 and self.rng.random() < eff_replay_p:
-            return self.sample(update_idx=update_idx, global_step=global_step)
+            return self.sample(update_idx=u_idx, global_step=global_step)
 
         tier = self._sample_tier()
         lvl_seed = self._new_seed()
         knobs = self._default_knobs(tier)
         level_id = f"proc_t{tier}_s{lvl_seed}"
-        entry = self.add(
+        stored = self.add(
             {
                 "level_id": level_id,
                 "tier": tier,
                 "knobs": knobs,
                 "seed": lvl_seed,
                 "score_gae": 1.0,
-                "last_seen_update": int(update_idx),
+                "last_seen_update": u_idx,
                 "visits": 1,
             }
         )
-        entry["scaffolding_alpha"] = alpha
-        return entry
+        return self._to_plr_entry(stored, alpha)
 
-    def update_score(self, level_id: str, gae_score: float, update_idx: int) -> None:
-        """Update stored GAE priority score and staleness timestamp for a level."""
-        entry = self._by_id.get(level_id)
+    def update_score(
+        self,
+        level_id: str | int,
+        gae_score: float,
+        update_idx: Optional[int] = None,
+    ) -> None:
+        """Update stored GAE priority score and staleness timestamp by level_id or seed."""
+        if update_idx is None:
+            self.update_idx += 1
+            u_idx = self.update_idx
+        else:
+            u_idx = int(update_idx)
+            self.update_idx = max(self.update_idx, u_idx)
+
+        if isinstance(level_id, int):
+            entry = self._by_seed.get(level_id)
+        else:
+            entry = self._by_id.get(level_id)
+            if entry is None and level_id.isdigit():
+                entry = self._by_seed.get(int(level_id))
+
         if entry is None:
             return
         old = float(entry["score_gae"])
         clean_s = _sanitize_score(gae_score)
         entry["score_gae"] = float(0.5 * old + 0.5 * clean_s)
-        entry["last_seen_update"] = int(update_idx)
+        entry["last_seen_update"] = u_idx
 
     def update_knobs(self, knob_deltas: dict[str, Any]) -> dict[str, Any]:
         """Apply bounded adjustments to curriculum knobs and tier weights (e.g. from llm_coach)."""
@@ -308,6 +386,7 @@ class PLRBuffer:
         self.global_knobs.update(dict(state.get("global_knobs", {})))
         self.entries = []
         self._by_id = {}
+        self._by_seed = {}
         self._used_seeds = set()
         for raw in state.get("entries", []):
             self.add(dict(raw))

@@ -1,6 +1,7 @@
 """HybridDoomNet: multi-modal recurrent actor-critic with 8-sector Ego-Directional Value Compass.
 
-Strictly ego-centric and zero-entity NaN-safe. Matches planning/Schema.md §2.3 and Design.md §2.
+Strictly ego-centric and zero-entity NaN-safe. Matches planning/Schema.md §2.3 and Design.md §2,
+while supporting `submission/agent.py` keyword calls cleanly.
 """
 
 from __future__ import annotations
@@ -11,7 +12,6 @@ from typing import Any, Optional
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .preprocessing import ModelInputs
 
@@ -195,6 +195,8 @@ def _as_tensor_dict(
     raw = batch.as_dict() if isinstance(batch, ModelInputs) else batch
     out: dict[str, torch.Tensor] = {}
     for key, val in raw.items():
+        if val is None:
+            continue
         if isinstance(val, torch.Tensor):
             t = val.to(device=device)
         else:
@@ -212,15 +214,27 @@ def _as_tensor_dict(
 class HybridDoomNet(nn.Module):
     """Multi-modal recurrent actor-critic with objective memory slots and 8-sector ego value compass."""
 
-    def __init__(self, model_config: Optional[dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        model_config: Optional[dict[str, Any]] = None,
+        *,
+        use_rgb: Optional[bool] = None,
+        use_grid: Optional[bool] = None,
+        rgb_dropout_p: Optional[float] = None,
+        d_model: Optional[int] = None,
+        gru_dim: Optional[int] = None,
+        num_slots: Optional[int] = None,
+        slot_dim: Optional[int] = None,
+    ) -> None:
         super().__init__()
         cfg = dict(model_config or {})
-        self.d_model = int(cfg.get("d_model", 256))
-        self.gru_dim = int(cfg.get("gru_dim", 256))
-        self.num_slots = int(cfg.get("num_slots", 4))
-        self.slot_dim = int(cfg.get("slot_dim", 8))
-        self.use_rgb = bool(cfg.get("use_rgb", True))
-        self.use_grid = bool(cfg.get("use_grid", True))
+        self.d_model = int(d_model if d_model is not None else cfg.get("d_model", 256))
+        self.gru_dim = int(gru_dim if gru_dim is not None else cfg.get("gru_dim", 256))
+        self.num_slots = int(num_slots if num_slots is not None else cfg.get("num_slots", 4))
+        self.slot_dim = int(slot_dim if slot_dim is not None else cfg.get("slot_dim", 8))
+        self.use_rgb = bool(use_rgb if use_rgb is not None else cfg.get("use_rgb", True))
+        self.use_grid = bool(use_grid if use_grid is not None else cfg.get("use_grid", True))
+        self.rgb_dropout_p = float(rgb_dropout_p if rgb_dropout_p is not None else cfg.get("rgb_dropout_p", 0.0))
         self.model_config = {
             "d_model": self.d_model,
             "gru_dim": self.gru_dim,
@@ -316,12 +330,31 @@ class HybridDoomNet(nn.Module):
         fused = torch.cat([ray_feat, ent_feat, vit_feat, rgb_feat, grid_feat], dim=-1)
         return self.fusion(fused)
 
-    def _update_slots(self, gru_out: torch.Tensor, prev_slots: torch.Tensor) -> torch.Tensor:
+    def _rotate_slots(self, slots: torch.Tensor, d_theta: Optional[torch.Tensor]) -> torch.Tensor:
+        if d_theta is None or self.slot_dim < 2:
+            return slots
+        cos_dt = torch.cos(-d_theta).view(-1, 1)
+        sin_dt = torch.sin(-d_theta).view(-1, 1)
+        s0 = slots[:, :, 0]
+        s1 = slots[:, :, 1]
+        r0 = s0 * cos_dt + s1 * sin_dt
+        r1 = s1 * cos_dt - s0 * sin_dt
+        if self.slot_dim == 2:
+            return torch.stack([r0, r1], dim=-1)
+        return torch.cat([torch.stack([r0, r1], dim=-1), slots[:, :, 2:]], dim=-1)
+
+    def _update_slots(
+        self,
+        gru_out: torch.Tensor,
+        prev_slots: torch.Tensor,
+        d_theta: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         bsz = gru_out.shape[0]
+        rot_slots = self._rotate_slots(prev_slots, d_theta)
         cand = torch.tanh(self.slot_write(gru_out)).view(bsz, self.num_slots, self.slot_dim)
         gru_exp = gru_out.unsqueeze(1).expand(-1, self.num_slots, -1)
-        gate = torch.sigmoid(self.slot_gate(torch.cat([gru_exp, prev_slots], dim=-1)))
-        return prev_slots + gate * (cand - prev_slots)
+        gate = torch.sigmoid(self.slot_gate(torch.cat([gru_exp, rot_slots], dim=-1)))
+        return rot_slots + gate * (cand - rot_slots)
 
     def _heads(
         self,
@@ -349,28 +382,41 @@ class HybridDoomNet(nn.Module):
 
     def forward(
         self,
-        batch: ModelInputs | dict[str, Any],
+        batch: Optional[ModelInputs | dict[str, Any]] = None,
         h: Optional[RecurrentState] = None,
         return_aux: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[dict[str, torch.Tensor]], RecurrentState]:
+        *,
+        inputs: Optional[ModelInputs | dict[str, Any]] = None,
+        recurrent_state: Optional[RecurrentState] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, Any, Any]:
         """Single-step forward pass for batch size B.
 
-        Returns `(logits_9 (B, 9), value (B,), aux_preds | None, next_h)`.
+        Canonical (`Schema.md §2.3`): always returns `(logits_9 (B, 9), value (B,), aux_preds | None, next_h)`.
         """
-        device = next(self.parameters()).device
-        d = _as_tensor_dict(batch, device)
-        bsz = d["rays"].shape[0]
-        if h is None:
-            h = self.init_state(bsz, device=device)
+        actual_batch = inputs if inputs is not None else batch
+        if actual_batch is None:
+            raise ValueError("HybridDoomNet.forward requires `batch` (or `inputs`)")
+        actual_h = recurrent_state if recurrent_state is not None else h
 
-        emb = self._encode_inputs(d)  # (B, d_model)
-        gru_seq, next_gru_h = self.gru(emb.unsqueeze(1), h.gru_h)
+        device = next(self.parameters()).device
+        d = _as_tensor_dict(actual_batch, device)
+        bsz = d["rays"].shape[0]
+        if actual_h is None:
+            actual_h = self.init_state(bsz, device=device)
+
+        rgb_drop_mask: Optional[torch.Tensor] = None
+        if self.training and self.rgb_dropout_p > 0.0:
+            rgb_drop_mask = torch.rand((bsz, 1), device=device) >= self.rgb_dropout_p
+
+        emb = self._encode_inputs(d, rgb_drop_mask=rgb_drop_mask)  # (B, d_model)
+        gru_seq, next_gru_h = self.gru(emb.unsqueeze(1), actual_h.gru_h)
         gru_out = gru_seq.squeeze(1)
-        next_slots = self._update_slots(gru_out, h.obj_slots)
+        next_slots = self._update_slots(gru_out, actual_h.obj_slots, d.get("d_theta"))
 
         core_feat = torch.cat([gru_out, next_slots.flatten(1)], dim=-1)
         logits, value, aux_preds = self._heads(core_feat, next_slots, d["action_mask"], return_aux)
-        return logits, value, aux_preds, RecurrentState(gru_h=next_gru_h, obj_slots=next_slots)
+        next_h = RecurrentState(gru_h=next_gru_h, obj_slots=next_slots)
+        return logits, value, aux_preds, next_h
 
     def forward_sequence(
         self,
@@ -378,7 +424,7 @@ class HybridDoomNet(nn.Module):
         h: Optional[RecurrentState] = None,
         done_mask: Optional[torch.Tensor] = None,
         return_aux: bool = False,
-        rgb_dropout_p: float = 0.0,
+        rgb_dropout_p: Optional[float] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[dict[str, torch.Tensor]], RecurrentState]:
         """Truncated BPTT sequence forward pass over (B, T, ...) with `(1 - done[t-1])` resetting.
 
@@ -392,13 +438,14 @@ class HybridDoomNet(nn.Module):
 
         flat = {k: v.reshape(bsz * seq_len, *v.shape[2:]) for k, v in d.items()}
 
+        drop_p = self.rgb_dropout_p if rgb_dropout_p is None else float(rgb_dropout_p)
         rgb_drop_mask: Optional[torch.Tensor] = None
-        if self.training and rgb_dropout_p > 0.0:
-            # Drop entire RGB+Depth modality per sequence chunk with probability p
-            chunk_keep = (torch.rand((bsz, 1), device=device) >= rgb_dropout_p).expand(bsz, seq_len)
+        if self.training and drop_p > 0.0:
+            chunk_keep = (torch.rand((bsz, 1), device=device) >= drop_p).expand(bsz, seq_len)
             rgb_drop_mask = chunk_keep.reshape(bsz * seq_len)
 
         emb = self._encode_inputs(flat, rgb_drop_mask=rgb_drop_mask).view(bsz, seq_len, self.d_model)
+        d_theta_seq = d.get("d_theta")
 
         gru_h = h.gru_h
         slots = h.obj_slots
@@ -415,11 +462,12 @@ class HybridDoomNet(nn.Module):
 
             gru_out_t, gru_h = self.gru(emb[:, t : t + 1, :], gru_h)
             gru_out_t = gru_out_t.squeeze(1)
-            slots = self._update_slots(gru_out_t, slots)
+            dt_t = d_theta_seq[:, t] if d_theta_seq is not None else None
+            slots = self._update_slots(gru_out_t, slots, dt_t)
             core_steps.append(torch.cat([gru_out_t, slots.flatten(1)], dim=-1))
             slot_steps.append(slots)
 
-        core_seq = torch.stack(core_steps, dim=1)  # (B, T, core_dim)
+        core_seq = torch.stack(core_steps, dim=1)   # (B, T, core_dim)
         slots_seq = torch.stack(slot_steps, dim=1)  # (B, T, num_slots, slot_dim)
 
         logits_flat, value_flat, aux_flat = self._heads(

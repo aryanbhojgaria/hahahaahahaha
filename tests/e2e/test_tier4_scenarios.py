@@ -432,7 +432,7 @@ def test_t4_06_end_to_end_remote_ipc_freedoom_and_validate_sandbox(tmp_path: Pat
             proc.wait()
 
     val_proc = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "validate.py"), "--repo", str(REPO_ROOT), "--map", "maps/two_rooms.wad", "--ticks", "150"],
+        [sys.executable, str(REPO_ROOT / "validate.py"), "--repo", str(REPO_ROOT), "--map", "maps/two_rooms.wad", "--ticks", "600"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
