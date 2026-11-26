@@ -382,6 +382,10 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
     last_loss = 0.0
     last_mean_return = 0.0
     best_mean_return = -float("inf")
+    if resume_path and isinstance(ckpt.get("scorer_summary"), dict):
+        prev_best = ckpt["scorer_summary"].get("total_score")
+        if prev_best is not None and float(prev_best) != 0.0:
+            best_mean_return = float(prev_best)
     last_ckpt_path: Optional[Path] = None
     best_ckpt_path: Optional[Path] = None
     rolling_returns: deque[float] = deque(maxlen=100)
@@ -710,7 +714,7 @@ def train(cfg_or_path: str | Path | dict[str, Any]) -> dict[str, Any]:
                     step=global_step,
                 )
 
-            if rolling_returns and roll_ret > best_mean_return:
+            if len(rolling_returns) >= min(10, max(1, num_envs)) and roll_ret > best_mean_return:
                 best_mean_return = roll_ret
                 summary_meta = {
                     "total_score": round(best_mean_return, 3),
@@ -792,6 +796,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--save-interval", type=int, default=None)
+    parser.add_argument("--latest-interval", type=int, default=None)
     parser.add_argument("--coach-interval", type=int, default=None)
     parser.add_argument("--use-llm-coach", action="store_true", default=False)
     args = parser.parse_args(argv)
@@ -813,6 +818,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         cfg["device"] = args.device
     if args.save_interval is not None:
         cfg["save_interval"] = int(args.save_interval)
+    if args.latest_interval is not None:
+        cfg["latest_interval"] = int(args.latest_interval)
     if args.coach_interval is not None:
         cfg["coach_interval"] = int(args.coach_interval)
     if args.use_llm_coach:
