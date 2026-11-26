@@ -1,18 +1,19 @@
 # Aman (MacBook Air M5) — Step-by-Step Runbook
 
-## 1. Role & Ownership Summary
-* **Role:** Procedural Map Generator, Dense Reward Engineer & PLR Curriculum Architect (**Free Tier — Ration Pro Turns Carefully!**).
+## 1. Role & Ownership Summary (3-Person Team)
+* **Role:** Extreme Domain-Randomized Procedural Map Generator, Coordinate-Free Dense Reward Engineer, Self-Evolving PLR Curriculum Architect & Narrative Lead (`README.md` + 2-Page Brief PDF) (**Free Tier — Ration Pro Turns Carefully!**).
 * **Files You Own:**
-  * `training/mapgen/udmf_builder.py` (Procedural PWAD / UDMF writer + `zdbsp`/`bsp` node compiler wrapper)
-  * `training/mapgen/tiers.py` (`MapGen.sample(tier, knobs, seed) -> Path` for Tiers 1–4 + internal BFS solvability verifier)
-  * `training/rewards.py` (Dense training-only reward shaper using `env.privileged_state()` & `env.sector_polygons()`)
-  * `training/curriculum_plr.py` (Prioritized Level Replay buffer + scaffolding annealing schedule)
-  * `training/scorer/eval_suite.json` & `maps/heldout/*.wad` (Locked disjoint benchmark maps for Aryan's LOQ judge)
+  * `training/mapgen/udmf_builder.py` (Procedural PWAD / UDMF writer + `zdbsp` node compiler wrapper)
+  * `training/mapgen/tiers.py` (`MapGen.sample(tier, knobs=None, seed=0, scaffolding_alpha=0.0) -> tuple[Path, str]` with **wide domain randomization & extreme scenarios**: tight claustrophobic ambushes, large open arenas, multi-branch corridor mazes, scarce ammo survival, dense monster waves, randomized geometry scales + internal BFS solvability verifier)
+  * `training/rewards.py` (Coordinate-free dense training-only reward shaper using relative `env.privileged_state()` deltas & `env.sector_polygons()` — zero fixed XYZ assumptions)
+  * `training/curriculum_plr.py` (Self-evolving Prioritized Level Replay buffer + scaffolding annealing schedule)
+  * `training/scorer/eval_suite.json` & `maps/heldout/*.wad` (Locked disjoint extreme random-map benchmark maps for Aryan's LOQ judge)
+  * Root `README.md`, `training/README.md`, and **2-Page Project Brief PDF**
   * `tests/test_mapgen_and_rewards.py`
 * **Interfaces You Provide & Consume (`Schema.md`):**
-  * **Provide to Vedesh:** `MapGen.sample(...)`, `RewardShaper`, and `PLRBuffer` plugged into `envs.py` & `ppo.py`.
-  * **Provide to Aryan:** `eval_suite.json` + pre-generated `maps/heldout/` WADs (`seed ∈ [1000, 9999]`, strictly disjoint from training seeds `≥ 100000`) + curated community/Freedoom benchmark list.
-  * **Provide to Swapnil:** Clean Tier 1–3 starter WAD pack at H4 so Swapnil records varied human demos immediately.
+  * **Provide to Vedesh:** `MapGen.sample(...)`, `RewardShaper.reset(sector_polygons)` + `step(priv_prev, priv_now, action, info=None)`, and `PLRBuffer` plugged into `envs.py` & self-evolving `ppo.py`.
+  * **Provide to Aryan:** `eval_suite.json` + pre-generated `maps/heldout/` extreme random WADs (`seed ∈ [1000, 9999]`, strictly disjoint from training seeds `≥ 100000`) + curated community/Freedoom benchmark list.
+  * **Consume from Aryan & Vedesh:** Held-out scorecards, ablation tables, and replay screenshots (`render_replay.py`) for the 2-Page Project Brief PDF.
 
 ---
 
@@ -77,8 +78,8 @@ ssh <vedesh-user>@<omen-tailscale-ip> "which zdbsp bsp"
 3. Implement `training/curriculum_plr.py`:
    * Maintain buffer of `256` active seeds across Tiers 1–4 scored by mean `|GAE|` + staleness bonus.
    * Implement scaffolding knob `scaffolding_alpha` (`1.0 → 0.0` over `12M` steps): at high `alpha`, fraction `alpha * 0.5` of Tier 2/3 doors spawn pre-opened or unlocked with extra ammo packs so early PPO discovers exits, decaying smoothly to `0.0` (100% vanilla).
-4. **H5–H5.5:** Record `20–30 minutes` of human demo episodes alongside Swapnil (especially Tier 3 key→door backtracking!) to double our BC dataset size.
-* **Done Criteria (H6 Gate):** 500/500 generated maps load & raycast `locked_door (3)` properly; `curriculum_plr.py` merged for Vedesh's Long Run #1.
+4. **H5–H5.5:** Stress-test extreme domain randomization (tight ambushes, wide open arenas, multi-branch mazes, scarce ammo, dense waves, randomized wall/ceiling heights & textures) so the self-evolving policy generalizes zero-shot without human demos.
+* **Done Criteria (H6 Gate):** 500/500 extreme random generated maps load & raycast `locked_door (3)` properly; `curriculum_plr.py` merged for Vedesh's Long Run #1.
 
 ### Phase 4 & 5 (H6–H12): Out-of-Distribution WAD Curation & Reward Audit
 * **AI Model & Command:** `Gemini Flash` + `/browser`.
@@ -87,11 +88,11 @@ ssh <vedesh-user>@<omen-tailscale-ip> "which zdbsp bsp"
 3. Audit Vedesh's Run #1 W&B reward curves (`rollout/sector_coverage`, `rollout/doors_unlocked`) to spot any reward hacking (e.g., farming door opens or suiciding) and adjust coefficients if needed.
 * **Done Criteria (H12 Gate):** Expanded `eval_suite.json` (40 diverse maps) locked; zero reward-hacking pathologies.
 
-### Phase 6, 7 & 8 (H12–H24): Tier 3/4 Replay Diagnosis, `training/README.md` & Pytest Audit
-* **AI Model & Command:** `Gemini Flash`.
-1. **H12–H16:** Watch replays of held-out Tier 3 & Tier 4 failures with Swapnil; make final pre-freeze tweaks to PLR tier weights before **H16 Feature Freeze**.
-2. **H16–H20:** Write clear, thorough `training/README.md` explaining the 4-tier procedural generator, ray-special verification, reward shaping formulas, PLR curriculum, and exact CLI commands so manual reviewers see original engineering immediately.
-3. **H20–H23.5:** Ensure `uv run pytest` passes 100% across all modules and participate in the 5-min Desk-Review Q&A rehearsal (own all questions on MapGen, Rewards, Curriculum, and Generalization!).
+### Phase 6, 7 & 8 (H12–H24): Tier 3/4 Replay Diagnosis, `README.md`, `training/README.md` & 2-Page Brief PDF
+* **AI Model & Command:** `Gemini Flash` (Pro for Brief PDF polish + optional `training/llm_coach.py` scorecard summarizer).
+1. **H12–H16:** Watch replays from Aryan's `render_replay.py` on held-out extreme Tier 3 & Tier 4 failures; make final pre-freeze tweaks to PLR tier weights before **H16 Feature Freeze** and draft Page 1–2 of the **2-Page Project Brief PDF**.
+2. **H16–H20:** Write clear, thorough `README.md` & `training/README.md` explaining the extreme domain-randomized generator, ray-special verification, coordinate-free reward shaping formulas, self-evolving PLR curriculum, and exact CLI commands; populate final held-out scorecard & ablation tables into the 2-Page Brief PDF.
+3. **H20–H23.5:** Ensure `uv run pytest` passes 100%, export final **2-Page Project Brief PDF (`≤ 2 pages`)**, and lead the 5-min Desk-Review Q&A rehearsal!
 
 ---
 

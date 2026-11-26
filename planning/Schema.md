@@ -1,6 +1,6 @@
 # Data Contracts, Tensor Schemas & Config Specifications
 
-> **Freeze Rule:** All shapes, keys, and file formats in this document freeze at **H0.5**. Vedesh, Aryan, Aman, and Swapnil code independently against these exact schemas.
+> **Freeze Rule:** H0 is active and all shapes, keys, signatures, and file formats in this document are **resolved and locked**. Vedesh, Aryan, and Aman (3-person team) code independently against these exact schemas, with **zero hardcoding and zero fixed XYZ coordinate assumptions**.
 
 ---
 
@@ -46,26 +46,50 @@
 | `ent_feats` | `(B, 32, 5)` | `float32` | `[dist, sin_a, cos_a, vel_fwd / 30.0, vel_right / 30.0]`. |
 | `ent_types` | `(B, 32)` | `int64` | Raw `entity_type` indices `0..11` (`0 = pad`). |
 | `ent_mask` | `(B, 32)` | `bool` | `mask > 0`. |
-| `vitals` | `(B, 27)` | `float32` | Normalized 16 scalar vitals + 8-dim weapon one-hot + `prev_action (9)`? Kept modular: `16` scalars + `8` weapon one-hot + `use_cooldown (1)` + `has_any_key (1)` + `ammo_low (1)` = `27` floats, concatenated with `prev_action (B, 9)` → `(B, 36)`. |
-| `rgb_depth` | `(B, 4, 48, 64)` | `float32` | `cv2.resize` bilinear `160×120 → 64×48`; channels `0..2 = rgb / 255.0`, channel `3 = depth / 255.0`. Zeroed with prob `p = 0.25` during training (modality dropout). |
+| `vitals` | `(B, 36)` | `float32` | `27` vitals/derived scalars (`16` normalized scalars + `8` weapon one-hot + `use_cooldown` (1) + `has_any_key` (1) + `ammo_low` (1)) concatenated with `prev_action (B, 9)` (`float32`) → `(B, 36)` `float32`. |
+| `rgb_depth` | `(B, 4, 48, 64)` | `float32` | Accepts both `(120, 160)` live `doom_env` frames (`cv2.resize` bilinear `160×120 → 64×48`) and `(48, 64)` `.npz` demo frames (passed through without redundant resize); channels `0..2 = rgb / 255.0`, channel `3 = depth / 255.0`. Zeroed with prob `p = 0.25` during training (modality dropout). |
 | `grid` | `(B, 6, 32, 32)` | `float32` | Egocentric `32×32` local map (`48` map units/cell, agent at center `(16, 16)` facing `+row/up`): `0: visited_decay`, `1: wall`, `2: door`, `3: locked_door`, `4: item_or_key`, `5: enemy_recent`. |
 | `action_mask` | `(B, 9)` | `bool` | `True` = button allowed to be `1`; `False` = forced `0` (`logits = -1e8`). `mask[7] (USE) = False` while `use_cooldown_steps > 0`; `mask[6] (ATTACK) = False` when `selected_weapon > 1 and selected_weapon_ammo <= 0`. |
 
-### 2.2 `OdomGridState` (Per-Environment Stateful Preprocessor Tracker)
-Reset on `DoomAgent.reset()` and whenever `done == True` in vectorized rollouts:
+### 2.2 `OdomGridState` & `preprocess()` Signature (`training/preprocessing.py`)
+Signature:
+```python
+def preprocess(obs: dict, state: Optional[OdomGridState] = None) -> tuple[ModelInputs, OdomGridState]
+```
+* When `state is None`, `preprocess()` cleanly initializes a fresh `OdomGridState` (zero grid, zero `prev_action`, `use_cooldown = 0`, initial ray history). Reset on `DoomAgent.reset()` and whenever `done == True` in vectorized rollouts:
 * `grid`: `np.ndarray` `(6, 32, 32)` `float32`
 * `prev_ray_dist`: `np.ndarray` `(64,)` `float32` (or `None` on step 0)
 * `prev_ray_type`: `np.ndarray` `(64,)` `int64`
-* `prev_action`: `np.ndarray` `(9,)` `int8`
+* `prev_action`: `np.ndarray` `(9,)` `float32` (zeros on reset; updated on step)
 * `use_cooldown`: `int` (counts down `6 → 0` after `action[7] == 1` when any front ray `[-4..+4]` sees `door`/`locked_door` within `dist < 0.15`)
 
-### 2.3 `RecurrentState` (PyTorch Tensor Tuple)
-* `gru_h`: `(1, B, 256)` `float32` — GRU hidden state.
-* `obj_slots`: `(B, 4, 8)` `float32` — Learned objective memory slots (`0: key_state`, `1: locked_door_mem`, `2: exit_mem`, `3: combat_breadcrumb`), warped by `(Δx, Δy, Δθ)` + gated GRU write.
+### 2.3 `RecurrentState` & `HybridDoomNet` Contract (`training/model.py`)
+* `RecurrentState`:
+  * `gru_h`: `(1, B, 256)` `float32` — GRU hidden state.
+  * `obj_slots`: `(B, 4, 8)` `float32` — Learned objective memory slots (`0: key_state`, `1: locked_door_mem`, `2: exit_mem`, `3: combat_breadcrumb`), warped by `(Δx, Δy, Δθ)` + gated GRU write.
+* `HybridDoomNet(model_config: dict)`:
+  * `forward(batch: ModelInputs, h: RecurrentState, return_aux: bool = False) -> tuple[torch.Tensor, torch.Tensor, Optional[dict], RecurrentState]`
+    * Returns `(logits_9, value, aux_preds, next_h)` where `aux_preds` is `None` when `return_aux=False` and a dict when `return_aux=True`:
+      * `"next_rays"`: `(B, 64)` `float32` — predicted next-step 360° ray distances.
+      * `"value_compass"`: `(B, 8)` `float32` — **Ego-Directional Value / Advantage Compass** predicting expected short/medium-horizon reward and novelty ("plus points") across 8 ego-centric angular sectors (`0` = ahead, CCW `45°`/sector), enabling directional credit assignment on arbitrary random maps without fixed world coordinates.
+      * `"door_prox"`: `(B, 3)`, `"key_prox"`: `(B, 3)`, `"exit_prox"`: `(B, 3)` (or `"obj_slots"`: `(B, 4, 8)`) — ego-relative presence + `(sin, cos)` bearing predictions.
+    * **Zero-entity safety:** When `ent_mask.sum(dim=-1) == 0` (no visible entities in frame), masked cross-attention / pooling safely produces zeroed entity embeddings without `NaN` (`softmax` over all-masked keys avoided via explicit zero-mask guard).
+
+### 2.4 `RewardShaper`, `MapGen` & Offline `llm_coach.py` Contracts (`training/rewards.py`, `training/mapgen/tiers.py`, `training/llm_coach.py`)
+* `RewardShaper`:
+  * `reset(sector_polygons: list | None = None) -> None` — initializes per-episode visited-sector geometry and previous stats (strictly relative deltas, zero fixed world XYZ assumptions).
+  * `step(priv_prev: dict, priv_now: dict, action: np.ndarray, info: dict | None = None) -> float` — computes dense training-only reward from `privileged_state()` deltas (exit, unique sector coverage, keycard pickup, door opened/unlocked, kills, damage balance, anti-spin/anti-`USE`-bounce).
+* `MapGen`:
+  * `sample(tier: int, knobs: dict | None = None, seed: int = 0, scaffolding_alpha: float = 0.0) -> tuple[Path, str]` — generates a node-built, BFS-verified solvable `.wad` (`< 2048` sectors) with **wide domain randomization & extreme scenarios** (tiny claustrophobic ambushes, large open arenas, multi-branch corridor mazes, scarce ammo survival, dense monster waves, randomized geometry scales), training scaffolding scaled by `scaffolding_alpha ∈ [0.0, 1.0]` (`0.0` = strictly vanilla rules), and returns `(wad_path, map_name)` (e.g. `(Path(...), "MAP01")`).
+* `llm_coach.py` *(Training / Offline Tooling Only — NEVER imported by `submission/`)*:
+  * Reads `CREO_BASE_URL` (`https://creo.creoai.workers.dev/v1`), `CREO_MODEL` (`@cf/openai/gpt-oss-120b`), and `CREO_API_KEY` from environment / gitignored `.env` (`.env.example` provides placeholders only). Falls back deterministically when offline or `CREO_API_KEY` is unset.
+  * Exposes `advise_curriculum(telemetry: dict, current_knobs: dict) -> dict` and `summarize_evaluation(scorecard: dict) -> str` for PLR knob tuning and 2-Page Brief scorecard analysis.
 
 ---
 
-## 3. Human Demo Dataset Schema (`data/demos/<player>/<ep_id>.npz`)
+## 3. Optional / Synthetic Trajectory Schema (`data/demos/<source>/<ep_id>.npz`)
+
+*(Optional — the primary RL pipeline in `training/ppo.py` is **100% self-evolving without requiring human demos**; `training/bc/train_bc.py` remains compatible with optional `.npz` or synthetic self-play trajectories.)*
 
 Compressed NumPy archive (`np.savez_compressed`), one file per recorded episode (gitignored from repo):
 * `rgb`: `(T, 48, 64, 3)` `uint8` *(already resized to save disk & speed up BC loading!)*
@@ -81,14 +105,14 @@ Compressed NumPy archive (`np.savez_compressed`), one file per recorded episode 
 * `dones`: `(T,)` `bool` (`True` on final step `T-1`)
 * `meta_json`: scalar UTF-8 JSON string:
   ```json
-  {"wad": "tier3_s104.wad", "map": "MAP01", "tier": 3, "player": "swapnil", "exit_reached": true, "ticks": 1480, "contract_version": "1.0.0-draft"}
+  {"wad": "tier3_s104.wad", "map": "MAP01", "tier": 3, "source": "synthetic", "exit_reached": true, "ticks": 1480, "contract_version": "1.0.0-draft"}
   ```
 
 ---
 
 ## 4. Checkpoint Schema (`.pt`)
 
-Saved via `torch.save(payload, path)` and loaded with `weights_only=False` (or safetensors + JSON config):
+Saved via `torch.save(payload, path)` and loaded with `weights_only=False` (or safetensors + JSON config). Both PPO checkpoints and `bc_warmstart.pt` emitted by `training/bc/train_bc.py` use this exact dictionary schema:
 ```python
 {
     "contract_version": "1.0.0-draft",
@@ -198,8 +222,54 @@ ent_coef: 0.01               # Anneal 0.015 -> 0.005
 rnd_coef: 0.05
 grid_novelty_coef: 0.03
 aux_coef: 0.10
-bc_kl_beta_init: 0.20        # Linear decay -> 0.0 over 4,000,000 env steps
+bc_kl_beta_init: 0.0         # Self-evolving RL default (0.0 without BC warmstart; 0.20 if optional BC used)
+compass_coef: 0.15           # 8-sector ego-directional value compass auxiliary loss weight
 rgb_dropout_p: 0.25          # Zero RGB+depth tensor per sequence chunk with p=0.25
 scaffolding_end_step: 12000000
 tier_weights: [1.0, 1.5, 2.5, 3.0]
+worker_max_episodes: 100     # Recycle subprocess worker every N episodes to prevent ViZDoom RAM creep
+worker_timeout_s: 15.0       # Restart single hung worker if pipe call exceeds 15s
+render_buffers_ratio: 0.25   # Fraction of workers with render_buffers=True (e.g. 4/16)
+```
+
+```yaml
+# training/configs/bc.yaml
+seed: 42
+demo_dir: "data/demos"
+output_checkpoint: "runs/bc/bc_warmstart.pt"
+seq_len: 32                  # BPTT chunk length T=32 with done boundary masking
+batch_seqs: 16
+epochs: 30
+lr: 3.0e-4
+weight_decay: 1.0e-4
+max_grad_norm: 0.5
+pos_weight_use: 2.5          # Sparse USE (button 7) BCE positive weight
+pos_weight_attack: 2.5       # Sparse ATTACK (button 6) BCE positive weight
+rgb_dropout_p: 0.15
+val_split: 0.10
+device: "auto"
+wandb_project: "devforge-doom"
+wandb_enabled: false
+model_config:
+  d_model: 256
+  gru_dim: 256
+  num_slots: 4
+  slot_dim: 8
+  use_rgb: true
+  use_grid: true
+```
+
+```yaml
+# training/configs/eval.yaml
+suite_path: "training/scorer/eval_suite.json"
+output_dir: "runs/eval"
+device: "cpu"
+cpu_threads: 1               # Enforces torch.set_num_threads(1) & PR #2 THREAD_ENV
+max_vram_mb: 2048            # PR #2 locked limit
+max_ram_mb: 8192             # PR #2 locked limit
+agent_ms_per_step: 40.0
+latency_target_ms: 25.0      # Promotion gate (< 25 ms/step mean)
+tier_weights: [1.0, 1.5, 2.5, 3.0]
+deterministic_seed: 0
+run_docker_validate: true
 ```
