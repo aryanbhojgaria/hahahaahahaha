@@ -122,12 +122,12 @@ uv run pytest
 
 Evaluated on [training/scorer/eval_suite.json](training/scorer/eval_suite.json) (24 disjoint procedural WADs + 3 `freedoom2.wad` maps) and verified with `validate.py` (see [eval_results_baseline.json](eval_results_baseline.json)):
 
-| Metric | Value (`best_agent.pt`, 77.8k steps) |
+| Metric | Value (`best_agent.pt`, 377.9k steps) |
 | --- | --- |
-| Held-out Total Score | **344.28** (`Tier 1–4 avg: 19.0 / 6.2 / 11.7 / 15.0`) |
-| Held-out Exit Rate | **3.7%** |
-| Scorer Latency (1 CPU thread) | **3.28 ms** mean / **18.74 ms** p99 *(budget: 40 ms)* |
-| `validate.py` Status | **PASSED** (`p50: 2.0 ms`, `p99: 7.5 ms`, repo `8.5 MB / 1.0 GB`) |
+| Held-out Total Score | **1,440.45** (`Tier 1–4 avg: 39.7 / 42.4 / 63.4 / 66.0`) |
+| Held-out Exit Rate | **14.8%** (4/27 maps, including Tier 2) |
+| Scorer Latency (1 CPU thread) | **1.80 ms** mean / **12.61 ms** p99 *(budget: 40 ms)* |
+| `validate.py` Status | **PASSED** (`< 40 ms/step`, repo `< 10 MB / 1.0 GB`) |
 
 ---
 
