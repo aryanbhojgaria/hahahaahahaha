@@ -1,187 +1,151 @@
-# Can It Play DOOM? — DevForge × Scaler Hackathon 2026 (Track 1: Deep RL)
+# Autonomous Zero-Shot DOOM Agent (Deep RL)
 
-> **Zero-shot DOOM agent that self-evolves on procedurally generated maps — no hardcoded world coordinates, no memorized button sequences.**
+> **Self-evolving Deep RL agent that navigates, fights, unlocks doors, and solves unseen 3D DOOM environments zero-shot — using purely ego-centric observations with zero hardcoded coordinates or scripted pathfinding.**
 
-This repository contains our Track 1 Deep RL submission for **DevForge × Scaler Hackathon 2026**. Our agent learns to play unseen DOOM levels zero-shot: navigating multi-room layouts, finding keycards, unlocking doors, surviving combat, and reaching the exit.
+[![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
+[![ViZDoom 1.3.3](https://img.shields.io/badge/ViZDoom-1.3.3-darkred.svg)](https://github.com/Farama-Foundation/ViZDoom)
+[![Gymnasium](https://img.shields.io/badge/Gymnasium-1.0+-0081a7.svg)](https://gymnasium.farama.org/)
 
 ---
 
-## Key Highlights
+## Overview
 
-- **Ego-centric perception** — 64-ray depth/hit-type raycasts, entity vitals, yaw-delta odometry, and a coordinate-free 32×32 local occupancy grid (world XYZ never enters the network).
-- **HybridDoomNet (Actor-Critic)** — circular 1-D Conv ray encoder, vitals encoder, 256-d GRU temporal core, 4 × 8-d Objective Memory Slots, an **8-sector Value Compass** auxiliary head, and a 9-action MultiBinary policy head with legal action masking.
-- **Self-evolving training loop** — Recurrent PPO + GAE + BPTT with RND curiosity, grid novelty bonus, optional BC-KL warmstart, and **Prioritized Level Replay (PLR)** over a 4-tier procedural UDMF map generator.
-- **LLM Curriculum Coach** — queries CreoAI to adapt PLR difficulty knobs online in `plr` mode, logs advisory telemetry in `staged` mode (without overriding stage progression), and falls back offline when `CREO_API_KEY` is unset.
-- **Strict evaluation envelope** — ≤ 2 GB VRAM, ≤ 8 GB RAM, 1 CPU thread (`torch.set_num_threads(1)`), and ≤ 40 ms/step verified via `validate.py`.
+Training an embodied agent to generalize to **completely unseen 3D maps** requires preventing the policy from memorizing fixed `(x, y)` coordinates, room layouts, or wall textures. This project implements a complete **coordinate-free, self-evolving Deep Reinforcement Learning system** built on `doom_env` (ViZDoom `1.3.3` / `freedoom2.wad`, Skill 3, `FRAME_SKIP = 4`):
+
+- **100% Ego-Centric Perception:** The agent never receives global `(x, y, z)` map coordinates. It observes only `rgb` (`120×160`), `depth`, `vitals`, `64` 360° raycasts (`distance` + `hit_type`), and `visible_entities` in its 90° FOV.
+- **Pure Neural Control:** Every action (`MultiBinary(9)`: move, strafe, turn, attack, use/open door, weapon switch) is produced by trained neural network parameters—no `A*`/BFS pathfinding, no `atan2` aimbots, and no hardcoded `if/else` action trees at inference.
+- **Self-Evolving Curriculum:** A Prioritized Level Replay (`PLRBuffer`) and 4-tier procedural UDMF map generator continuously adapt map difficulty, geometry, and scaffolding to the agent's learning frontier.
+
+---
+
+## Key Architecture & Features
+
+### 1. `HybridDoomNet` (`training/model.py`)
+- **Circular 1D Ray Encoder:** Preserves 360° wraparound across all 64 rays (`distance`, `1 - distance`, and 6-way `hit_type`: wall, door, locked door, enemy, item).
+- **Masked Entity Set Encoder:** Pre-LN Multi-Head Self-Attention over up to `32` visible entities with `NaN`-safe zero-entity pooling.
+- **Scan-Matched Egocentric Occupancy Grid (`training/odometry_grid.py`):** Estimates ego yaw delta `Δθ` via 64-ray circular scan-matching and affine-warps a `32×32` 6-channel local semantic map (`visited`, `wall`, `door`, `locked_door`, `item`, `enemy`).
+- **Compact RGB+Depth CNN:** Depthwise-separable encoder (`64×48`) with `p = 0.25` modality dropout during training to prevent texture overfitting.
+- **Temporal & Objective Memory:** `256`-dim GRU + `4 × 8` Objective Memory Slots + an **8-Sector Ego-Directional Value Compass** auxiliary head.
+
+### 2. Procedural 4-Tier Map Generator (`training/mapgen/`)
+- Generates watertight ZDoom UDMF (`TEXTMAP`) PWADs from `(tier, knobs, seed)` with randomized global origin offsets (`[-2048, 2048]`), 90° rotations, room/corridor scales, lighting, step heights, and textures.
+- **Tiers 1–4:** Open combat arenas → multi-room door navigation → keycard backtracking (`Blue/Yellow/Red`) → multi-lock gauntlets with ambush enemies.
+- **Generation-Time BFS Solvability:** Every generated map is verified solvable (`spawn → keycard(s) → locked door(s) → exit`) before being written.
+
+### 3. Coordinate-Free Dense Rewards & PLR (`training/rewards.py`, `training/curriculum_plr.py`)
+- **Dynamic Sector & Delta Shaping:** Tracks visited sectors via point-in-polygon over `env.sector_polygons()` and rewards exits, unique sector discovery, keycards, door opens/unlocks, kills, and pickups while penalizing damage, death, door-reversal bounces, wall-scraping, and wasted blind shots.
+- **PLR + Scaffolding Annealing:** Maintains `256` active procedural seeds (`[100_000, 999_999]`, strictly disjoint from held-out seeds `[1_000, 9_999]`), prioritized by `mean |GAE|` + staleness, with optional CreoAI LLM curriculum knob adaptation (`training/llm_coach.py`).
+
+---
+
+## Benchmark & Latency Results
+
+Evaluated zero-shot on [training/scorer/eval_suite.json](training/scorer/eval_suite.json) (`24` disjoint procedural WADs across Tiers 1–4 + `3` `freedoom2.wad` maps) under a **1 CPU thread** (`torch.set_num_threads(1)`), **≤ 2 GB VRAM**, **≤ 8 GB RAM**, and **≤ 40 ms/step** budget:
+
+| Metric | Value (`best_agent.pt`, 881k steps) |
+| :--- | :--- |
+| **Held-Out Total Score** | **3,122.37** *(Tier 1–4 avg: `51.7 / 90.2 / 114.7 / 196.9`)* |
+| **Zero-Shot Exit Rate** | **22.2%** |
+| **Single-Thread Inference Latency** | **3.02 ms** mean / **13.03 ms** p99 *(limit: `40.0 ms`)* |
+| **Contract & Sandbox Validator** | **PASSED** (`validate.py`) |
+
+![Training & Held-Out Analytics](docs/training_analytics.png)
 
 ---
 
 ## Installation
 
 ### Recommended (`uv` + Python 3.13)
-
-This repository pins exact dependencies in `pyproject.toml` and `uv.lock`:
-
 ```bash
 uv sync
 ```
 
-### Standard `pip` (if not using `uv`)
-
+### Standard `pip`
 ```bash
 pip install -e env/
 pip install -r submission/requirements.txt
-# Or if using a root requirements.txt:
-pip install -r requirements.txt
 ```
 
-> **Platform support:** Linux (x86-64/ARM), macOS on Apple Silicon (macOS 15+), and Windows (x86-64) work natively with `uv sync` and `validate.py`. For the closest match to the Linux evaluation sandbox, use Docker:
->
-> ```bash
-> docker build -t devforge-doom .
-> python validate.py --docker --image devforge-doom
-> ```
+### Docker (Linux Sandbox Parity)
+```bash
+docker build -t doom-rl .
+python validate.py --docker --image doom-rl
+```
 
 ---
 
 ## Usage
 
-### Train
-
-Run the self-evolving PPO curriculum trainer (with optional live CreoAI LLM Coach & resume):
-
+### 1. Train the Agent
 ```bash
-# Offline smoke test (no API key required)
-CREO_API_KEY="" uv run python -m training.ppo \
-  --config training/configs/ppo_curriculum.yaml \
-  --max-steps 500
+# Fast-start curriculum (recommended for CPU / Apple Silicon)
+uv run python -m training.ppo --config training/configs/ppo_fast_start.yaml
 
-# Full training with live CreoAI LLM Curriculum Coach
+# Full curriculum with optional live LLM Coach
 CREO_API_KEY="<your-key>" uv run python -m training.ppo \
   --config training/configs/ppo_curriculum.yaml \
   --use-llm-coach \
-  --coach-interval 25 \
   --best-out submission/weights/best_agent.pt
 
-# Resume from an existing checkpoint
+# Resume from a checkpoint
 uv run python -m training.ppo \
   --config training/configs/ppo_curriculum.yaml \
-  --resume runs/ppo_flagship/checkpoints/latest.pt \
-  --use-llm-coach
+  --resume runs/ppo_flagship/checkpoints/latest.pt
 ```
 
-Supported CLI overrides include `--max-steps`, `--total-updates`, `--num-envs`, `--output-dir`, `--best-out`, `--resume`, `--device`, `--save-interval`, `--coach-interval`, and `--use-llm-coach`.
-
-### Score on Held-Out Suite & Live Spectator
-
+### 2. Live 3-Panel Spectator Viewer
+Watch the agent play in real time with RGB camera, 90° raycast/entity detections, 360° radar, `32×32` egocentric occupancy grid, and live checkpoint auto-reload:
 ```bash
-# Evaluate a checkpoint on the 27-map held-out benchmark suite
+uv run python training/visualize_obs.py \
+  --checkpoint submission/weights/best_agent.pt \
+  --watch \
+  --random-maps
+```
+
+### 3. Evaluate & Validate
+```bash
+# Score on the 27-map held-out benchmark suite
 uv run python -m training.scorer.score_checkpoint \
   --checkpoint submission/weights/best_agent.pt \
   --suite training/scorer/eval_suite.json \
-  --out eval_results_baseline.json \
+  --out eval_results.json \
   --device cpu
 
-# Watch the agent live (RGB + 32×32 ego-centric occupancy grid + 64-ray radar)
-uv run python training/visualize_obs.py --checkpoint submission/weights/best_agent.pt --watch --random-maps
-```
-
-> **Current Submitted Checkpoint (`submission/weights/best_agent.pt`, strictly loaded):** **`2,076.24`** local proxy score on the 27-map validation suite (`training/scorer/eval_suite.json`; official organizer weights are hidden) — **`25.9%`** exit rate (`5/6` Tier 1 exits, `2/7` Tier 2 exits, `121` kills, `3` keys, `34` doors opened, `3` locks unlocked), **`2.73 ms`** mean `act()` (`13.10 ms` p99) on 1 CPU thread; `validate.py` **PASSED** (`two_rooms.wad:MAP01` exit in `72` steps, `p50 6.9 ms`, `p99 19.4 ms`); **`244/244`** pytest tests passing.
->
-> **Disjoint Map Splits:** Training (`100_000–999_999`), Validation (`training/scorer/eval_suite.json`, `27` maps), and Final Test (`training/scorer/final_test_suite.json`, `18` maps — never used for training or selection).
->
-> ![Training & Held-Out Analytics](docs/training_analytics.png)
-
-### Validate
-
-Verify the submission contract, single-thread latency budget (≤ 40 ms/step), and memory limits:
-
-```bash
+# Run contract, latency, and memory validation
 uv run python validate.py
-# Or:
-python validate.py
-```
 
-### Verify Submission Entrypoint
-
-Check that the evaluation agent imports cleanly:
-
-```bash
-uv run python -c "from submission.agent import DoomAgent; print('OK')"
-# Or:
-python -c "from submission.agent import DoomAgent; print('OK')"
-```
-
-### Run Tests
-
-```bash
+# Run test suite
 uv run pytest
 ```
 
 ---
 
-## Held-Out Benchmark & Validation Results
-
-Evaluated on [training/scorer/eval_suite.json](training/scorer/eval_suite.json) (24 disjoint procedural WADs + 3 `freedoom2.wad` maps) and verified with `validate.py` (see [eval_results_baseline.json](eval_results_baseline.json)):
-
-| Metric | Value (`best_agent.pt`, 77.8k steps) |
-| --- | --- |
-| Held-out Total Score | **344.28** (`Tier 1–4 avg: 19.0 / 6.2 / 11.7 / 15.0`) |
-| Held-out Exit Rate | **3.7%** |
-| Scorer Latency (1 CPU thread) | **3.28 ms** mean / **18.74 ms** p99 *(budget: 40 ms)* |
-| `validate.py` Status | **PASSED** (`p50: 2.0 ms`, `p99: 7.5 ms`, repo `8.5 MB / 1.0 GB`) |
-
----
-
-## Module Layout
+## Repository Structure
 
 ```text
-env/                      # doom_env — official ViZDoom Gymnasium wrapper (spaces, sensors, limits)
+env/                      # doom_env — ViZDoom Gymnasium wrapper (spaces, sensors, limits)
 training/                 # Deep RL training pipeline
-  ├── configs/            # YAML configs (ppo_curriculum.yaml, bc.yaml, eval.yaml)
-  ├── mapgen/             # 4-tier procedural UDMF map generator & verifier
-  ├── bc/                 # Optional behavioural cloning warmstart
-  ├── scorer/             # Heldout evaluation suite, checkpoint scorer, replay renderer
+  ├── configs/            # YAML configs (ppo_curriculum.yaml, ppo_fast_start.yaml, bc.yaml, eval.yaml)
+  ├── mapgen/             # 4-tier procedural UDMF map generator & 500-map stress verifier
+  ├── bc/                 # Behavioural cloning & DAgger warmstart utilities
+  ├── scorer/             # Held-out evaluation suite, checkpoint scorer, replay renderer
   ├── model.py            # HybridDoomNet (RayCircularEncoder, GRU, ObjectiveSlots, Value Compass)
   ├── preprocessing.py    # Ego-centric preprocessing, ActionMask, ModelInputs
   ├── odometry_grid.py    # Coordinate-free scan-matched occupancy grid
-  ├── rewards.py          # Coordinate-free sector-based reward shaper
+  ├── rewards.py          # Coordinate-free sector-based dense reward shaper
   ├── curriculum_plr.py   # Prioritized Level Replay (PLR) buffer
-  ├── envs.py             # VecDoomEnv multiprocessing wrapper
+  ├── envs.py             # VecDoomEnv multiprocessing worker pool
   ├── rnd.py              # Random Network Distillation curiosity + grid novelty
-  ├── llm_coach.py        # CreoAI curriculum coach with deterministic offline fallback
+  ├── llm_coach.py        # Adaptive curriculum coach with offline fallback
+  ├── visualize_obs.py    # 3-panel live spectator & manual play visualizer
   └── ppo.py              # Recurrent PPO + GAE + BPTT training entrypoint
 submission/
-  ├── agent.py            # DoomAgent evaluation entrypoint (act / reset, 1-thread guard)
-  ├── requirements.txt    # Extra pinned pip packages for the evaluation container
-  └── weights/            # Trained weights tracked via Git LFS (best_agent.pt)
-tests/                    # Unit, integration, and E2E test suite
-maps/                     # Test map (two_rooms.wad) + 32 heldout evaluation WADs (maps/heldout/)
-docs/                     # Official contract, rules, submission guide, evaluation spec
-planning/                 # Architecture design, frozen schemas, PRD, and team runbooks
-validate.py               # Pre-submission validator (contract, latency, RAM/VRAM)
-PROJECT_BRIEF.md          # 2-page project brief
+  ├── agent.py            # DoomAgent inference entrypoint (act / reset, 1-thread guard)
+  ├── requirements.txt    # Extra pinned runtime dependencies
+  └── weights/            # Trained model weights tracked via Git LFS (best_agent.pt)
+maps/                     # Baseline test map (two_rooms.wad) + 32 held-out WADs (maps/heldout/)
+tests/                    # Unit, integration, and end-to-end test suite
+docs/                     # Technical specs, contract, architecture brief, and analytics
+validate.py               # End-to-end contract, latency, and resource validator
 ```
-
----
-
-## Documentation & Rules
-
-| Doc | Contents |
-| --- | --- |
-| [PROJECT_BRIEF.pdf](PROJECT_BRIEF.pdf) | Final 2-page Project Brief PDF for submission |
-| [docs/PROJECT_BRIEF.md](docs/PROJECT_BRIEF.md) | 2-page architecture overview, benchmarks, and rule compliance |
-| [eval_results_baseline.json](eval_results_baseline.json) | Held-out evaluation scorecard for `submission/weights/best_agent.pt` |
-| [docs/CONTRACT.md](docs/CONTRACT.md) | Observation/action spaces and `DoomAgent` interface |
-| [docs/RULES.md](docs/RULES.md) | Ground rules and disqualifiers (no hardcoded XYZ, no rule trees / A* / aimbots) |
-| [docs/SUBMISSION.md](docs/SUBMISSION.md) | Submission checklist, Git LFS, 1 GB limit, `requirements.txt` |
-| [docs/EVALUATION.md](docs/EVALUATION.md) | Map tiers, scoring categories, hardware envelope, timeouts |
-
----
-
-## Team
-
-- **Vedesh** — RL / PPO (`envs.py`, `ppo.py`, `rnd.py`, `llm_coach.py`, `bc/`)
-- **Aryan** — Model / Scorer (`model.py`, `preprocessing.py`, `odometry_grid.py`, `submission/agent.py`, `scorer/`)
-- **Aman** — MapGen / Rewards (`mapgen/`, `rewards.py`, `curriculum_plr.py`)
-- **Swapnil** — Training / Docs (smoke testing, training runs, `README.md`, documentation)
