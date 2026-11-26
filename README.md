@@ -1,6 +1,6 @@
-# Yugaantar 2026 · DevForge — Track 1: "Can It Play DOOM?"
+# DevForge — Track 1: "Can It Play DOOM?"
 
-Starter template & active team repository for **Yugaantar 2026 · DevForge — Track 1: "Can It Play DOOM?"**, synced from [`Reinforce-SST/devforge-doom-template`](https://github.com/Reinforce-SST/devforge-doom-template) (`63b90c441ca92bcdf043de9ee3930ac6370a44bc`) at **H0** and hosted on `origin/main` (`https://github.com/aryanbhojgaria/hahahaahahaha.git`).
+Starter template & active team repository for ** · DevForge — Track 1: "Can It Play DOOM?"**, synced from [`Reinforce-SST/devforge-doom-template`](https://github.com/Reinforce-SST/devforge-doom-template) (`63b90c441ca92bcdf043de9ee3930ac6370a44bc`) at **H0** and hosted on `origin/main` (`https://github.com/aryanbhojgaria/hahahaahahaha.git`).
 
 > For decades, *"Can it run DOOM?"* was the ultimate hardware test. Now: **can your neural network
 > actually play DOOM?** Train an agent that plays unseen levels **zero-shot**: survive ambushes,
