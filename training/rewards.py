@@ -20,7 +20,7 @@ class RewardWeights:
     exit_speed_bonus: float = 3.0
     new_sector: float = 0.40
     key_pickup: float = 4.00
-    door_open: float = 0.60
+    door_open: float = 1.20
     locked_door_unlock: float = 5.00
     kill: float = 1.00
     item_pickup: float = 0.15
@@ -28,6 +28,7 @@ class RewardWeights:
     death: float = -4.00
     door_reversal_bounce: float = -0.30
     stuck_wall_scrape: float = -0.02
+    wasted_shot: float = -0.015
     step_cost: float = -0.002
 
 
@@ -64,6 +65,7 @@ class RewardShaper:
             self.w_death = float(weights.death)
             self.w_door_bounce = float(weights.door_reversal_bounce)
             self.w_stuck = float(weights.stuck_wall_scrape)
+            self.w_wasted_shot = float(weights.wasted_shot)
             self.w_step = float(weights.step_cost)
         else:
             w = dict(weights or {})
@@ -71,7 +73,7 @@ class RewardShaper:
             self.w_exit_speed = float(w.get("exit_speed", 3.0))
             self.w_sector = float(w.get("sector", 0.40))
             self.w_key = float(w.get("key", 4.00))
-            self.w_door = float(w.get("door", 0.60))
+            self.w_door = float(w.get("door", 1.20))
             self.w_locked_door = float(w.get("locked_door", 5.00))
             self.w_kill = float(w.get("kill", 1.00))
             self.w_item = float(w.get("item", 0.15))
@@ -79,6 +81,7 @@ class RewardShaper:
             self.w_death = float(w.get("death", -4.00))
             self.w_door_bounce = float(w.get("door_bounce", -0.30))
             self.w_stuck = float(w.get("stuck", -0.02))
+            self.w_wasted_shot = float(w.get("wasted_shot", -0.015))
             self.w_step = float(w.get("step", -0.002))
 
         self._sectors: list[tuple[int, float, float, float, float, np.ndarray, float]] = []
@@ -249,6 +252,8 @@ class RewardShaper:
         kill_delta = max(0, int(priv_now.get("kills", 0)) - int(priv_prev.get("kills", 0)))
         if kill_delta > 0:
             comp["kill"] = self.w_kill * float(kill_delta)
+        elif len(act) > 6 and int(act[6]) == 1 and not bool(priv_now.get("finished", False)):
+            comp["wasted_shot"] = self.w_wasted_shot
 
         item_delta = max(0, int(priv_now.get("items", 0)) - int(priv_prev.get("items", 0)))
         if item_delta > 0:
