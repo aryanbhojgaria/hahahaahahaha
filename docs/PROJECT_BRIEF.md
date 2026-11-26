@@ -46,6 +46,8 @@ Evaluated on `training/scorer/eval_suite.json` (24 disjoint procedural WADs + 3 
 - **Sampling Temperature (`tau`) Ablation on `377.9k` Checkpoint:** `tau=0.50` (`1217.46`, `7.4%` exit), `tau=0.65` (`1050.80`, `3.7%` exit), **`tau=0.85` (`1440.45`, `14.8%` exit, `56` kills)**, `tau=1.00` (`1085.30`, `11.1%` exit).
 - **Diagnostic Breakdown (`eval_results_diagnostics.json`):** `56` total kills, `35` doors opened, `7` keycards collected, `46.8%` mean sector exploration, only `3/27` timeouts (`20` deaths / `15` early deaths).
 
+![Held-Out Diagnostics & Temperature Ablation](heldout_diagnostics.png)
+
 ### 5. Honest Limitations & Future Work
 - **Scan-Matching Drift:** Rapid multi-tic wall collisions can introduce minor `Δθ` drift in the `32×32` local grid, partially mitigated by exponential decay (`0.992`) and GRU hidden state.
 - **Early Combat Survival & Key-to-Lock Backtracking:** Diagnostic breakdown shows `15` early deaths and `0/7` collected keycards converted into unlocked doors on Tiers 3–4; continued Stage 3–4 vanilla fine-tuning directly targets this bottleneck.

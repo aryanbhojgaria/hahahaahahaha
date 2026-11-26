@@ -129,6 +129,39 @@ def draw_grid_map(grid: np.ndarray, width: int = 320, height: int = 240) -> np.n
     return upscaled
 
 
+def draw_policy_bar(
+    probs: np.ndarray | None,
+    action: np.ndarray,
+    step_idx: int,
+    total_w: int = 960,
+    bar_h: int = 64,
+) -> np.ndarray:
+    """Renders a live neural policy probability bar strip across the bottom."""
+    strip = np.full((bar_h, total_w, 3), (20, 22, 28), dtype=np.uint8)
+    cv2.line(strip, (0, 0), (total_w, 0), (65, 75, 90), 1)
+    p_arr = probs if probs is not None and len(probs) == 9 else np.zeros(9, dtype=np.float32)
+
+    slot_w = total_w // 9
+    for i, name in enumerate(ACTION_NAMES):
+        x0 = i * slot_w + 10
+        x1 = (i + 1) * slot_w - 10
+        p = float(np.clip(p_arr[i], 0.0, 1.0))
+        active = bool(action[i] == 1)
+
+        cv2.rectangle(strip, (x0, 26), (x1, 44), (45, 48, 58), -1)
+        fill_w = int((x1 - x0) * p)
+        col = (60, 215, 110) if active else (220, 150, 70)
+        if fill_w > 0:
+            cv2.rectangle(strip, (x0, 26), (x0 + fill_w, 44), col, -1)
+        cv2.rectangle(strip, (x0, 26), (x1, 44), (90, 100, 115), 1)
+
+        lbl_col = (120, 255, 160) if active else (195, 200, 210)
+        cv2.putText(strip, f"{name} {int(round(p * 100))}%", (x0, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.38, lbl_col, 1, cv2.LINE_AA)
+
+    cv2.putText(strip, f"Policy Probs (tau=0.85) | Step {step_idx}", (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (140, 150, 165), 1, cv2.LINE_AA)
+    return strip
+
+
 def render_replay(
     wad_path: str,
     map_name: str = "MAP01",
@@ -137,7 +170,7 @@ def render_replay(
     max_steps: int = 500,
     fps: int = 15,
 ) -> None:
-    """Records and writes an MP4 replay combining RGB + Radar + Grid."""
+    """Records and writes an MP4 replay combining RGB + Radar + Grid + Policy Probs."""
     print(f"[RenderReplay] Loading map: {wad_path} ({map_name})...")
     env = make_env(wad=wad_path, map_name=map_name, episode_ticks=max_steps * 4, render_buffers=True)
 
@@ -156,7 +189,8 @@ def render_replay(
     obs, info = env.reset(seed=42)
 
     panel_w, panel_h = 320, 240
-    total_w, total_h = panel_w * 3, panel_h
+    bar_h = 64
+    total_w, total_h = panel_w * 3, panel_h + bar_h
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     out_video = cv2.VideoWriter(output_path, fourcc, fps, (total_w, total_h))
@@ -190,8 +224,12 @@ def render_replay(
         current_grid = agent.odom_state.grid if agent.odom_state else np.zeros((6, 32, 32))
         panel_grid = draw_grid_map(current_grid, panel_w, panel_h)
 
-        # Concatenate 3 panels side-by-side
-        frame = np.hstack([panel_rgb, panel_radar, panel_grid])
+        # Bottom Panel: Policy Action Probabilities
+        policy_strip = draw_policy_bar(getattr(agent, "last_probs", None), action, step_idx, total_w=total_w, bar_h=bar_h)
+
+        # Concatenate 3 panels + policy strip
+        top_row = np.hstack([panel_rgb, panel_radar, panel_grid])
+        frame = np.vstack([top_row, policy_strip])
         out_video.write(frame)
 
         obs, reward, terminated, truncated, info = env.step(action)

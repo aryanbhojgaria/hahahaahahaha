@@ -75,6 +75,7 @@ class DoomAgent:
         self.rng = np.random.default_rng(0)
         self.odom_state: OdomGridState | None = None
         self.recurrent_state: RecurrentState | None = None
+        self.last_probs: np.ndarray | None = None
 
     def reset(self) -> Any:
         """Called before every map. Clear recurrent state, memory buffers and trackers."""
@@ -162,6 +163,7 @@ class DoomAgent:
         # Prevents freezing in limit cycles while maintaining high fidelity to trained weights
         tau = self.tau
         probs = 1.0 / (1.0 + np.exp(-np.clip(logits_arr / tau, -20.0, 20.0)))
+        self.last_probs = probs
         rand_vals = self.rng.random(len(probs))
         action = (rand_vals < probs).astype(np.int8)
 
