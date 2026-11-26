@@ -1,17 +1,17 @@
 # Aryan (Lenovo LOQ — i5-13th Gen + RTX 4050) — Step-by-Step Runbook
 
-## 1. Role & Ownership Summary
-* **Role:** Neural Architecture, Spatial Memory, Inference Contract (`DoomAgent`) & Automated Checkpoint Judge (**Free Tier — Ration Pro Turns Carefully!**).
+## 1. Role & Ownership Summary (3-Person Team)
+* **Role:** Neural Architecture, Spatial Memory, Inference Contract (`DoomAgent`), Automated Random-Map Judge & Replay Visualizer (**Free Tier — Ration Pro Turns Carefully!**).
 * **Files You Own:**
-  * `training/preprocessing.py` (Exact observation scaling, `64×48` RGB+depth resize, legal `USE`/`ATTACK` action mask)
+  * `training/preprocessing.py` (Strictly coordinate-free observation scaling, `(120,160)` & `(48,64)` RGB+depth support, legal `USE`/`ATTACK` action mask)
   * `training/odometry_grid.py` (360° circular ray scan-matching yaw estimator + `cv2.warpAffine` `32×32` 6-ch occupancy grid)
-  * `training/model.py` (`HybridDoomNet`: Circular 1D Ray Conv, Masked Entity Attention, Vitals MLP, Compact RGB+Depth CNN w/ modality dropout, Grid CNN, GRU + 4 Objective Memory Slots, 9 Bernoulli Heads, Critic, Aux Heads)
-  * `submission/agent.py` (`DoomAgent`: `__init__`, `reset`, `act` — `torch.set_num_threads(1)`, strict `< 25 ms/step` target)
-  * `training/scorer/eval_suite.py` & `training/scorer/score_checkpoint.py` (Local mirror of `EVALUATION.md` + automated promoter)
+  * `training/model.py` (`HybridDoomNet`: Circular 1D Ray Conv, NaN-safe Masked Entity Attention, `(B, 36)` Vitals MLP, Compact RGB+Depth CNN w/ dropout, Grid CNN, GRU + 4 Objective Memory Slots, 9 Bernoulli Heads, Critic, Aux Heads incl. **8-sector Ego-Directional Value Compass `value_compass: (B, 8)`**)
+  * `submission/agent.py` (`DoomAgent`: `__init__`, `reset`, `act` — `torch.set_num_threads(1)`, **offline `--network none`**, zero `openai`/`llm_coach` imports, strict `< 25 ms/step` target)
+  * `training/scorer/eval_suite.py`, `training/scorer/score_checkpoint.py` (Local mirror of `EVALUATION.md` on unseen extreme random maps + automated promoter) & `training/scorer/render_replay.py` (Side-by-side RGB + Egocentric Grid replay visualizer)
   * `tests/test_model_and_agent.py`
 * **Interfaces You Provide & Consume (`Schema.md`):**
-  * **Provide to Vedesh & Swapnil:** `preprocess(obs, odom_state)` and `HybridDoomNet` matching `Schema.md §2` shapes at H1.5.
-  * **Consume from Aman:** Held-out benchmark manifest & WAD files (`maps/heldout/*.wad` + `eval_suite.json`).
+  * **Provide to Vedesh:** `preprocess(obs, state=None)` and `HybridDoomNet` (with `value_compass: (B, 8)` when `return_aux=True`) matching `Schema.md §2` shapes.
+  * **Consume from Aman:** Held-out extreme random-map benchmark manifest & WAD files (`maps/heldout/*.wad` + `eval_suite.json`).
   * **Consume from Vedesh:** Incoming `.pt` checkpoints from OMEN via Tailscale (`runs/incoming/`).
 
 ---
@@ -20,8 +20,8 @@
 
 Run inside **WSL2 Ubuntu 24.04** on LOQ:
 ```bash
-# 1. System packages + Docker WSL2 integration check
-sudo apt update && sudo apt install -y build-essential cmake git git-lfs curl libgl1 libglib2.0-0 libsdl2-dev rsync tmux htop
+# 1. System packages + Docker WSL2 integration check (note libglib2.0-0t64 on Ubuntu 24.04)
+sudo apt update && sudo apt install -y ca-certificates curl wget git git-lfs libgl1 libglib2.0-0t64 libsdl2-2.0-0 build-essential cmake libsdl2-dev rsync tmux htop
 git lfs install
 nvidia-smi     # Confirm RTX 4050 is visible
 
@@ -83,8 +83,8 @@ uv tool run wandb login
 1. Checkout `feat/aryan-grid-slots`. Implement `training/odometry_grid.py` (`Design.md §2.2`):
    * Circular shift search `k ∈ [k_prior - 4, k_prior + 4]` across 64 rays + 3-point parabolic refinement for continuous `Δθ`.
    * `cv2.warpAffine` on `(32, 32, 6)` grid shifted by `(vel_forward * 4 / 48.0, vel_right * 4 / 48.0)` and rotated by `-Δθ`, then splat current 64 ray hits into `visited, wall, door, locked_door, item, enemy_recent`.
-2. Enable `Objective Memory Slots (4, 8)` with 2D rotation by `-Δθ` and training-only `aux_preds` (`next_rays`, `door_bearing`, `key_bearing`) in `model.py`.
-3. Visualize 1 episode of the 6 grid channels as PNGs on `maps/two_rooms.wad` to verify walls stay crisp when turning!
+2. Enable `Objective Memory Slots (4, 8)` with 2D rotation by `-Δθ` and training-only `aux_preds` (`next_rays`, **`value_compass: (B, 8)`**, `door_prox`, `key_prox`, `exit_prox`) in `model.py`.
+3. Visualize 1 episode of the 6 grid channels as PNGs on `maps/two_rooms.wad` and build `training/scorer/render_replay.py` (side-by-side RGB + Ego Grid replay capture)!
 * **Done Criteria (H6 Gate):** Walls align cleanly across 90° turns in PNG debug plot; single-thread CPU `act()` with Grid+RGB stays `< 20 ms`; merged before Vedesh launches Run #1.
 
 ### Phase 4 (H6–H8): Automated Checkpoint Judge Daemon on LOQ
@@ -97,16 +97,16 @@ uv tool run wandb login
 
 ### Phase 5 & 6 (H8–H16): Controlled Ablation Run & Latency Optimization
 * **AI Model & Command:** `Gemini Flash` + `/goal`.
-1. Use LOQ's RTX 4050 between checkpoint evaluations (`nice -n 10`, `8` workers) to train a **No-Grid Ablation (`use_grid=False`)** for 4–5M steps on the exact same map stream.
-   * *Why:* Gives Swapnil undeniable quantitative proof for Brief Page 2 that Scan-Matched Grid + Slots improves Tier 2/3 scores, **and** gives us a tested backup checkpoint if Grid ever misbehaves!
+1. Use LOQ's RTX 4050 between checkpoint evaluations (`nice -n 10`, `8` workers) to train a **No-Grid / No-Compass Ablation (`use_grid=False`)** for 4–5M steps on the exact same extreme random-map stream.
+   * *Why:* Gives Aman undeniable quantitative proof for Brief Page 2 that Scan-Matched Grid + Value Compass improves Tier 2/3 scores, **and** gives us a tested backup checkpoint if Grid ever misbehaves!
 2. Profile `DoomAgent` inside `docker run --cpus=1 --memory=8g` using `validate.py --docker`. Trim conv channels or enable `torch.inference_mode()` optimizations before **H16 Feature Freeze**.
 * **Done Criteria (H16 Gate):** Ablation metrics recorded; `DoomAgent` frozen at `< 18 ms/step` on 1 CPU core in Docker.
 
 ### Phase 7 & 8 (H16–H24): 40-Map Final Tournament, LFS Promotion & Rule Audit
 * **AI Model & Command:** `Gemini Flash`.
 1. Between H18–H20, run the expanded 40-map held-out tournament across top Run #3 and Vanilla Fine-Tune checkpoints (including 4,200-tick endurance maps).
-2. Copy the winning `.pt` to `submission/weights/best_agent.pt`, verify `git lfs track`, commit & push via PR, and send final score breakdown table to Swapnil for the 2-Page Brief.
-3. **Rule Compliance Audit (H21):** Read every single line in `submission/` and `training/preprocessing.py` + `odometry_grid.py` to confirm zero banned constructs (`RULES.md §1.1`) and confirm `submission/requirements.txt` has zero extra packages.
+2. Copy the winning `.pt` to `submission/weights/best_agent.pt`, verify `git lfs track`, commit & push to `main`, and send final score breakdown table + replay captures to Aman for the 2-Page Brief.
+3. **Rule Compliance Audit (H21):** Read every single line in `submission/` and `training/preprocessing.py` + `odometry_grid.py` to confirm zero banned constructs (`RULES.md §1.1`), zero fixed XYZ assumptions, zero `openai`/`llm_coach`/network imports, and confirm `submission/requirements.txt` has zero extra packages (`check_imports()` passes).
 4. Run independent clean-clone `python validate.py --docker` check on LOQ by **H22.5**.
 
 ---

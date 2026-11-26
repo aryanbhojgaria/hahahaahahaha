@@ -27,21 +27,22 @@ flowchart TD
     GRU --> SLOTS["Objective Memory Slots: Key Held, Lock Seen, Exit Bearing"]
     SLOTS --> POL["9 Bernoulli Action Heads + Obs Action Mask"]
     SLOTS --> VAL["Critic Value Head"]
-    SLOTS --> AUX["Training-Only Aux Heads: Next Rays, Door/Key Proximity"]
+    SLOTS --> AUX["Training-Only Aux Heads: Next Rays, 8-Sector Ego Value Compass, Door/Key/Exit Prox"]
 ```
 
-### 1.2 Training, PLR Curriculum & LOQ Promotion Pipeline
+### 1.2 100% Self-Evolving Training, Extreme PLR Curriculum & LOQ Promotion Pipeline
 
 ```mermaid
 flowchart LR
-    MAP["Procedural UDMF MapGen + Built-in/Community WADs"] --> PLR["Prioritized Level Replay: Tier & Difficulty Knobs"]
+    MAP["Extreme Domain-Randomized MapGen + Built-in/Community WADs"] --> PLR["Self-Evolving PLR: Extreme Scenarios & Difficulty Knobs"]
     PLR --> ENVS["Parallel Subprocess doom_env Workers on OMEN"]
-    DEMO["Human Demos: BC Recorder on Macs"] --> BC["Behavior Cloning Pretrain"]
-    BC --> PPO["Custom Recurrent PPO + RND + BC-KL + Aux Losses"]
-    ENVS --> BUF["Rollout Buffer + Privileged Reward Shaper"]
-    BUF --> PPO
+    ENVS --> BUF["Rollout Buffer + Coordinate-Free Privileged Reward Shaper"]
+    BUF --> PPO["100% Self-Evolving Recurrent PPO + RND + Value Compass + Aux"]
+    OPT["Optional/Synthetic BC Warmstart (never required)"] -.-> PPO
     PPO --> CKPT["Periodic Checkpoints to Shared Sync"]
-    CKPT --> JUDGE["LOQ Automated Judge: Held-Out Scorer + Docker Validate"]
+    CKPT --> JUDGE["LOQ Automated Judge: Random-Map Scorer + Docker Validate"]
+    JUDGE -->|"Telemetry JSON"| COACH["Offline training/llm_coach.py (gpt-oss-120b)"]
+    COACH -.->|"Bounded PLR Knob Proposals"| PLR
     JUDGE -->|"Logs Metrics"| WB["Weights & Biases Shared Dashboard"]
     JUDGE -->|"New Best and under 25ms"| PROMOTE["Promote to submission/weights via Git LFS"]
 ```
@@ -123,9 +124,10 @@ flowchart LR
 * **Objective Memory Slots (`(B, 4, 8)`):**
   * Updated each step via a residual gated write from `gru_out` + explicit 2D rotation of the first two `(cos, sin)` components of each slot by `-Δθ`.
   * Concatenated `[gru_out (256), slots.flatten (32)] = 288` → policy & critic heads.
-* **Training-Only Auxiliary Heads (`aux_coef = 0.10`):**
-  1. Predict next-step downsampled 16-bin ray distances (`SmoothL1Loss`).
-  2. Predict binary presence + ego `(sin, cos)` bearing to nearest closed/locked door and nearest keycard/exit computed from `privileged_state()` during training. *(Teaches slots to retain locked-door direction after walking away!)*
+* **Training-Only Auxiliary Heads (`aux_coef = 0.10`, `compass_coef = 0.15`):**
+  1. Predict next-step downsampled 64-bin ray distances (`next_rays: (B, 64)`, `SmoothL1Loss`).
+  2. **8-Sector Ego-Directional Value / Advantage Compass (`value_compass: (B, 8)`):** Predicts expected short/medium-horizon discounted reward + sector/grid novelty ("plus points") for each of 8 ego-centric angular sectors (`0..7`, `45°` per sector, `0` = straight ahead, CCW), supervised during PPO from ego-aligned future motion/reward deltas with **zero fixed world XYZ assumptions**.
+  3. Predict binary presence + ego `(sin, cos)` bearing to nearest closed/locked door and nearest keycard/exit computed from `privileged_state()` during training. *(Teaches slots to retain locked-door direction after walking away!)*
 
 ### 2.4 Policy Heads, Action Masking & Inference Sampling
 * **Policy Head:** `Linear(288, 128) → SiLU → Linear(128, 9)` producing independent logits for the 9 buttons.

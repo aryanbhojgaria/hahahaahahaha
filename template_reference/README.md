@@ -29,6 +29,10 @@ No dataset is provided. Your agent learns by interacting with the engine.
 4. Put weights in `submission/weights/` (Git LFS) and training code in `training/`.
 5. Run `python validate.py --docker` and submit your repo URL.
 
+**Platforms:** Linux (x86-64/ARM), macOS on Apple Silicon (macOS 15+) and Windows (x86-64) all
+work with `uv sync` and `validate.py`. Intel Macs have no `vizdoom` 1.3.3 wheel: use Docker or a
+Linux machine. Evaluation runs on Linux, so `validate.py --docker` is the closest check.
+
 ## Repository layout
 
 ```
@@ -61,8 +65,10 @@ The wrapper's `reward` is a basic default for convenience. Shape your own reward
 
 ## Hardware at evaluation
 
-One NVIDIA **RTX 3090 (24 GB)** shared between evaluation workers. Plan for ≤ 6 GB VRAM
-per agent *(draft)* and fast inference (see [timeouts](docs/EVALUATION.md#timeouts)).
+One NVIDIA **RTX 3090 (24 GB)** shared between evaluation workers. Each agent gets **2 GB VRAM,
+8 GB RAM and 1 CPU thread**, so keep models compact and inference fast
+(see [hardware](docs/EVALUATION.md#hardware) and [timeouts](docs/EVALUATION.md#timeouts)).
+`validate.py` runs your agent under the same CPU/RAM limits and reports GPU memory.
 
 ## Documentation
 
