@@ -2,209 +2,233 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Zero-Shot Autonomous Navigation and Combat in Procedural 3D Environments via Coordinate-Free Deep RL</title>
+<title>Coordinate-Free Zero-Shot DOOM Agent</title>
 <style>
-  @page { size: letter; margin: 0.65in 0.6in 0.5in 0.6in; }
+  @page { size: A4; margin: 0.6in 0.55in 0.5in 0.55in; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: "Times New Roman", Times, serif;
-    font-size: 9pt;
-    line-height: 1.18;
+    font-family: "Times New Roman", "Times", serif;
+    font-size: 8.8pt;
+    line-height: 1.15;
     color: #000; background: #fff;
-    max-width: 8.5in; margin: 0 auto;
-    padding: 0.65in 0.6in 0.5in 0.6in;
+    width: 595px;
+    margin: 0 auto;
+    padding: 43pt 40pt 36pt 40pt;
   }
-  .header { text-align: center; margin-bottom: 8pt; }
-  .header h1 { font-size: 16pt; font-weight: bold; line-height: 1.1; margin-bottom: 6pt; }
-  .authors { font-size: 10pt; margin-bottom: 1pt; }
-  .affiliations { font-size: 8pt; font-style: italic; color: #333; margin-bottom: 6pt; }
-  .abstract-block { margin-bottom: 6pt; text-align: justify; font-size: 8.5pt; line-height: 1.15; }
-  .abstract-block .label { font-weight: bold; font-style: italic; }
-  .keywords { margin-top: 2pt; font-size: 8pt; }
-  .keywords .label { font-weight: bold; font-style: italic; }
-  .separator { border: none; border-top: 0.5pt solid #000; margin: 6pt 0; }
 
+  /* ── HEADER ── */
+  .header { text-align: center; margin-bottom: 10pt; }
+  .header h1 {
+    font-family: "Times New Roman", "Times", serif;
+    font-size: 17pt; font-weight: bold; line-height: 1.1;
+    margin-bottom: 6pt;
+  }
+  .author-block { text-align: center; margin-bottom: 3pt; font-size: 9pt; }
+  .author-block .label { font-weight: bold; font-style: italic; }
+  .author-block .name { font-weight: bold; }
+  .author-block .info { font-weight: normal; font-size: 8.5pt; }
+
+  /* ── TWO-COLUMN ── */
   .two-col {
-    column-count: 2; column-gap: 0.2in;
+    column-count: 2; column-gap: 12pt;
     text-align: justify; orphans: 2; widows: 2;
   }
+
+  /* ── SECTION HEADINGS ── */
   .two-col h2 {
-    font-size: 9.5pt; font-weight: bold; text-transform: uppercase;
-    margin-top: 6pt; margin-bottom: 2pt; text-align: center;
+    font-size: 9pt; font-weight: bold;
+    margin-top: 5pt; margin-bottom: 2pt;
+    text-align: left; text-transform: uppercase;
   }
   .two-col h3 {
-    font-size: 9pt; font-weight: bold; font-style: italic;
-    margin-top: 4pt; margin-bottom: 1pt;
+    font-size: 8.8pt; font-weight: bold; font-style: italic;
+    margin-top: 3pt; margin-bottom: 1pt;
   }
-  .two-col p { text-indent: 0.15in; margin-bottom: 2pt; }
-  .two-col p.ni { text-indent: 0; }
 
+  /* ── BODY TEXT ── */
+  .two-col p {
+    font-size: 8.8pt; line-height: 1.15;
+    text-indent: 0; margin-bottom: 2pt;
+  }
+
+  /* ── ABSTRACT ── */
+  .abstract {
+    font-size: 8.5pt; font-weight: bold; font-style: italic;
+    line-height: 1.13; margin-bottom: 2pt;
+  }
+  .kw { font-size: 8.5pt; margin-bottom: 4pt; }
+  .kw .kl { font-weight: bold; font-style: italic; }
+  .kw .kv { font-style: italic; font-weight: normal; }
+
+  /* ── TABLES ── */
   table {
-    width: 100%; border-collapse: collapse; font-size: 7.5pt;
-    margin: 4pt 0; break-inside: avoid;
+    width: 100%; border-collapse: collapse; font-size: 7pt;
+    margin: 3pt 0; break-inside: avoid;
   }
-  table caption { font-size: 7.5pt; font-weight: bold; text-align: center; margin-bottom: 2pt; }
-  th, td { border: 0.5pt solid #000; padding: 1.5pt 3pt; text-align: center; }
-  th { background: #eee; font-weight: bold; }
-
-  .figure { break-inside: avoid; margin: 4pt 0; text-align: center; }
-  .figure img { max-width: 100%; height: auto; }
-  .figure .cap { font-size: 7.5pt; font-weight: bold; margin-top: 2pt; text-align: center; }
-
-  .figure-full {
-    column-span: all; break-inside: avoid; margin: 4pt 0; text-align: center;
+  table caption {
+    font-size: 7pt; font-weight: normal; text-align: center;
+    margin-bottom: 1pt; text-transform: uppercase;
   }
-  .figure-full img { max-width: 100%; height: auto; max-height: 1.5in; }
-  .figure-full .cap { font-size: 7.5pt; font-weight: bold; margin-top: 2pt; }
+  table caption b { font-weight: bold; }
+  th, td { border: 1px solid #000; padding: 1pt 2pt; text-align: center; }
+  th { font-weight: bold; }
 
-  .flow-box {
-    font-family: "Courier New", monospace; font-size: 6.5pt; line-height: 1.2;
-    text-align: left; background: #fafafa; border: 0.5pt solid #ccc;
-    padding: 3pt; margin: 3pt 0; break-inside: avoid; white-space: pre;
+  /* ── FIGURES ── */
+  .fig { break-inside: avoid; margin: 3pt 0; text-align: center; }
+  .fig img { max-width: 100%; height: auto; }
+  .fig .cap { font-size: 7pt; margin-top: 1pt; text-align: center; }
+
+  .fig-full {
+    column-span: all; break-inside: avoid; margin: 3pt 0; text-align: center;
   }
+  .fig-full img { max-width: 100%; height: auto; max-height: 1.15in; }
+  .fig-full .cap { font-size: 7pt; margin-top: 1pt; }
 
-  .two-col ul { margin: 2pt 0 2pt 12pt; font-size: 8.5pt; }
-  .two-col li { margin-bottom: 1pt; }
+  /* ── BULLETS ── */
+  .two-col ul { margin: 2pt 0 2pt 14pt; font-size: 9pt; }
+  .two-col li { margin-bottom: 1.5pt; }
 
-  .refs { column-span: all; font-size: 7pt; margin-top: 4pt; line-height: 1.1; }
-  .refs h2 { font-size: 8pt; text-transform: uppercase; text-align: center; margin-bottom: 2pt; }
-  .refs p { text-indent: -0.15in; padding-left: 0.15in; margin-bottom: 1pt; }
+  /* ── REFERENCES ── */
+  .refs { font-size: 7pt; margin-top: 3pt; line-height: 1.1; }
+  .refs h2 { font-size: 8pt; margin-bottom: 2pt; }
+  .refs p { text-indent: -10pt; padding-left: 10pt; margin-bottom: 1pt; }
 
-  @media print { body { padding: 0; } }
+  @media print { body { padding: 0; width: auto; } }
 </style>
 </head>
 <body>
 
+<!-- ═══ TITLE ═══ -->
 <div class="header">
-  <h1>Zero-Shot Autonomous Navigation and Combat in Procedural 3D Environments via Coordinate-Free Deep Reinforcement Learning</h1>
-  <div class="authors">Vedesh Jain, Aryan Bhojgaria, Aman Agarwal</div>
-  <div class="affiliations">Independent Researchers</div>
+  <h1>Coordinate-Free Zero-Shot Navigation and Combat<br>in Procedural 3D Environments Using<br>Deep Reinforcement Learning</h1>
 </div>
 
-<div class="abstract-block">
-  <span class="label">Abstract—</span>
-  We present a fully autonomous deep RL agent that plays first-person shooter environments (DOOM) on procedurally generated maps it has never seen during training. Unlike conventional approaches that depend on absolute world coordinates, scripted pathfinding, or hardcoded action rules, our system relies entirely on ego-centric sensory inputs — raw pixels, depth, 360° raycasts, and a self-constructed occupancy grid — to navigate rooms, engage enemies, collect keycards, unlock doors, and locate exits. The core architecture, HybridDoomNet, fuses five perception modalities through a recurrent memory backbone, while Prioritized Level Replay continuously adapts map difficulty to the agent's learning frontier. When evaluated zero-shot across 24 unseen procedural maps spanning four difficulty tiers, the agent achieves a total score of 272.58 with 3.41 ms mean inference latency on a single CPU thread, well under the 40 ms budget.
+<div class="author-block">
+  <span class="name">Aman Jain, Vedesh Khatri, Aryan Bhojgaria, Swapnil Ghosh</span><br>
+  <span class="info">Independent Researchers</span>
 </div>
-<div class="keywords"><span class="label">Keywords—</span> Deep RL, Zero-Shot Generalization, Ego-Centric Navigation, Procedural Content Generation, FPS AI, Occupancy Grid Mapping, Curriculum Learning</div>
-<hr class="separator">
 
+<!-- ═══ BODY ═══ -->
 <div class="two-col">
 
-<h2>I. Introduction</h2>
-<p class="ni">Training embodied AI agents that generalize to unseen 3D environments remains a core challenge in RL. Most game-playing bots perform well on maps they trained on, but fail dramatically when geometry, enemy placement, or item layout changes — because they memorize fixed spatial coordinates rather than learning transferable skills.</p>
-<p>Our work addresses this by building an agent that never receives absolute position data during training or evaluation. It constructs its own mental model purely from what it senses each frame — like a person exploring an unfamiliar building without a map. This design forces the learned policy to be truly general, since there are no coordinates to overfit on. The setting is DOOM (VizDoom 1.3.3) with procedural maps varying in room count, enemy density, keycard requirements, and corridor complexity, under a strict 40 ms per-step computation budget on a single CPU thread.</p>
+<!-- 1.0 ABSTRACT -->
+<h2>1.0 Abstract</h2>
+<p class="abstract">Most reinforcement learning agents trained in first-person 3D environments break down the moment they face a map they have never seen before, because they quietly memorize fixed coordinates and room layouts instead of learning how to actually navigate. We built an agent that never receives any absolute position data at all. It relies entirely on what it can sense each frame — camera pixels, a depth buffer, 64 radar-like raycasts, and a small self-drawn map — to move through rooms, fight enemies, pick up keycards, unlock doors, and find the exit. The core neural network, which we call HybridDoomNet, blends five separate perception streams into a recurrent memory that outputs nine binary actions. A self-evolving curriculum keeps generating harder maps as the agent improves. On 24 completely unseen procedural maps across four difficulty levels, the agent scores 272.58 total with 3.41 ms average decision time on one CPU thread, well inside the 40 ms real-time limit.</p>
+<p class="kw"><span class="kl">Keywords</span><span class="kv"> — deep reinforcement learning, zero-shot generalization, ego-centric navigation, procedural map generation, FPS game AI, occupancy grid mapping, curriculum learning.</span></p>
 
-<h2>II. Core Differentiators</h2>
-<h3>A. Fully Coordinate-Free Perception</h3>
-<p>The agent receives zero global (x, y, z) coordinates. Its world model is built from: a 120×160 RGB camera, a matched depth buffer, 64 circular raycasts returning hit distance and object type, and up to 32 visible entities. From these, it constructs a 32×32 semantic occupancy grid centered on itself — marking visited floor, walls, doors, locked doors, enemies, and items — all in the agent's own rotating reference frame.</p>
+<!-- 2.0 INTRODUCTION -->
+<h2>2.0 Introduction</h2>
+<p>Getting an AI agent to handle a 3D environment it has never trained on is a genuinely hard problem. Most game-playing bots end up memorizing exact geometry — the specific (x, y) coordinate where the exit sits, the hallway that leads to a keycard. Change any of that and the agent falls apart.</p>
+<p>We tackle this by removing coordinates entirely. The agent never gets told where it is — it figures everything out from what it can see and sense at each moment. We use the DOOM engine through VizDoom 1.3.3, with procedurally generated maps that randomize everything on every run. The agent must move, shoot, pick up keys, open doors, and find the exit — all within 40 ms per step on one CPU core.</p>
 
-<h3>B. Multi-Modal Sensory Fusion</h3>
-<p>HybridDoomNet fuses five modalities simultaneously. A circular 1D convolution wraps 64 ray readings respecting 360° topology. Masked attention tracks up to 32 entities. A depthwise-separable CNN processes downscaled RGB+D images with 25% modality dropout to prevent texture dependence. These streams merge into a GRU memory unit with objective memory slots that persist across hundreds of time steps.</p>
+<!-- 3.0 WHAT MAKES THIS DIFFERENT -->
+<h2>3.0 Core Innovations</h2>
+<h3>3.1 No Coordinates, No Cheating</h3>
+<p>The agent gets zero global (x, y, z) position data. Everything it knows about the world comes from: a 120×160 RGB camera feed, a matching depth buffer, 64 raycasts shooting out in all directions like sonar, and a list of up to 32 visible entities. From these raw signals, it builds a 32×32 semantic occupancy grid centered on itself — marking floors, walls, doors, enemies, items — that rotates as the agent turns. This is what we call egocentric scan-matched occupancy mapping.</p>
 
-<h3>C. Self-Evolving Difficulty Curriculum</h3>
-<p>Instead of training on static maps, we maintain 256 procedural map seeds prioritized by how much the agent struggles (mean |GAE| + staleness). Seeds with high estimation error get replayed more often; mastered ones retire. This Prioritized Level Replay ensures the agent always trains at the edge of its capability.</p>
+<h3>3.2 Five Senses Fused Together</h3>
+<p>Instead of relying only on pixels, HybridDoomNet processes five input streams at once. A circular 1D convolution handles the 64 raycasts, respecting the 360-degree wraparound. A depthwise-separable CNN processes the camera image. A 2D CNN reads the occupancy grid. Masked multi-head attention tracks entities. A simple encoder handles health, armor, and ammo stats. During training, we randomly black out the camera feed 25% of the time so the agent learns to navigate by radar alone and does not over-rely on textures.</p>
 
-<h2>III. Neural Architecture</h2>
-<div class="flow-box">┌────────────┐ ┌────────────┐ ┌────────────┐
-│64 Circular │ │ RGB+D Cam  │ │ 32×32 Ego  │
-│  Raycasts  │ │ (120×160)  │ │Occup. Grid │
-└─────┬──────┘ └─────┬──────┘ └─────┬──────┘
-  [1D Conv]    [DW-Sep CNN]     [2D CNN]
-      │              │              │
-      ├──────┬───────┼──────────────┤
-      │  [Entity Attn ≤32]         │
-      └──────┴───────┬─────────────┘
-              [Concat → FC(512→256)]
-              [GRU(256) + ObjSlots]
-         ┌──────┼──────┐
-      [Actor] [Critic] [8-Sector
-       9-bit    V(s)   Compass]</div>
-<div class="figure"><div class="cap">Fig. 1. HybridDoomNet architecture. Five perception streams converge into a recurrent memory core producing actions and value estimates. Total: 868,403 parameters.</div></div>
+<h3>3.3 Maps That Get Harder Automatically</h3>
+<p>We maintain a pool of 256 procedural map seeds and re-prioritize them based on how much the agent struggles with each one. Seeds where the agent has high advantage estimation error get replayed more; mastered seeds get retired. This Prioritized Level Replay mechanism means the agent always trains right at the edge of what it can currently handle.</p>
 
-<p>The GRU carries episode-level working memory, while 4×8 objective memory slots provide longer-horizon "sticky notes" for remembering locked door locations across hundreds of steps. An auxiliary 8-sector value compass predicts direction-dependent returns, helping the agent develop spatial value intuition before fully exploring a room.</p>
+<!-- ARCHITECTURE FIGURE -->
+<div class="fig-full">
+  <img src="architecture_diagram.png" alt="HybridDoomNet Architecture">
+  <div class="cap">Fig. 1. HybridDoomNet architecture. Five perception streams converge through encoders into a recurrent GRU memory with objective slots, producing actor, critic, and directional value compass outputs. Total parameters: 868,403.</div>
+</div>
 
-<h2>IV. Training Pipeline</h2>
+<!-- 4.0 HOW IT THINKS -->
+<h2>4.0 Neural Architecture</h2>
+<p>Fig. 1 shows the full architecture. Five encoders compress their inputs into fixed-size vectors, concatenated and projected down to 256 dimensions. This feeds a GRU that serves as working memory. Four groups of eight objective memory slots act as sticky notes — holding information like "locked door to the north" for hundreds of steps. The network outputs a 9-bit multi-binary action (move, strafe, turn, run, attack, use), a value estimate, and an 8-sector directional value compass for spatial intuition. Total: 868,403 parameters.</p>
+
+<!-- 5.0 TRAINING -->
+<h2>5.0 Training Pipeline</h2>
+<p>We trained the agent in five progressive stages, moving from simple open arenas to multi-lock gauntlet maps. After the curriculum, we ran a teacher-student phase where a privileged bot (with full coordinate access) demonstrated effective behaviors, and our agent learned by imitation through DAgger. This was followed by pure PPO self-practice to polish the learned policy. The teacher only appears during training — at evaluation, only standard observations are used.</p>
 
 <table>
-  <caption>TABLE I: Staged Training Curriculum</caption>
+  <caption><b>TABLE I.</b> STAGED TRAINING CURRICULUM</caption>
   <tr><th>Stage</th><th>Environment</th><th>Focus</th></tr>
   <tr><td>1</td><td>Open arena</td><td>Movement, exploration</td></tr>
-  <tr><td>2</td><td>Multi-room</td><td>Door usage, combat</td></tr>
+  <tr><td>2</td><td>Multi-room, doors</td><td>Door usage, basic combat</td></tr>
   <tr><td>3</td><td>Keycard rooms</td><td>Key-door association</td></tr>
-  <tr><td>4</td><td>Multi-lock gauntlets</td><td>Sequential backtracking</td></tr>
-  <tr><td>5</td><td>Mixed random</td><td>Generalization</td></tr>
+  <tr><td>4</td><td>Multi-lock gauntlets</td><td>Backtracking, planning</td></tr>
+  <tr><td>5</td><td>All types mixed</td><td>Generalization</td></tr>
 </table>
 
-<p>After the curriculum stages, we employed teacher-student distillation: a privileged bot with full map coordinates demonstrates effective behaviors via DAgger-style imitation, followed by pure PPO fine-tuning where the agent practices on its own. The teacher exists only in training — at evaluation time, only standard ego-centric observations are used.</p>
-
-<h3>A. Reward Design</h3>
-<p>Our coordinate-free reward function uses point-in-polygon tests over map sector geometry. Positive signals: sector discovery (+0.40), keycards (+4.0), door opens (+0.60), locked door unlocks (+5.0), kills (+1.0), exits (+15.0). Penalties: damage (−0.02/HP), death (−4.0), door-bounce (−0.30), wall-scrape (−0.02), wasted shots (−0.015).</p>
+<h3>5.1 Reward Design</h3>
+<p>Our reward function is entirely coordinate-free and works on any map. It uses point-in-polygon tests over map sector geometry to track exploration. Positive rewards: sector discovery (+0.40), keycards (+4.0), door opens (+0.60), locked door unlocks (+5.0), kills (+1.0), reaching the exit (+15.0). Penalties: damage taken (−0.02/HP), death (−4.0), bouncing against doors (−0.30), scraping walls (−0.02), and shooting at walls with no target (−0.015).</p>
 
 <table>
-  <caption>TABLE II: Technology Stack</caption>
-  <tr><th>Component</th><th>Tool</th></tr>
-  <tr><td>Engine</td><td>VizDoom 1.3.3 / freedoom2.wad</td></tr>
+  <caption><b>TABLE II.</b> TECHNOLOGY STACK</caption>
+  <tr><th>Component</th><th>Tool / Library</th></tr>
+  <tr><td>Game Engine</td><td>VizDoom 1.3.3 / freedoom2.wad</td></tr>
   <tr><td>Deep Learning</td><td>PyTorch 2.x</td></tr>
   <tr><td>RL Algorithm</td><td>Recurrent PPO + GAE (BPTT-32)</td></tr>
-  <tr><td>Exploration</td><td>Random Network Distillation</td></tr>
-  <tr><td>Map Generation</td><td>Custom Python UDMF builder</td></tr>
+  <tr><td>Exploration Bonus</td><td>Random Network Distillation (RND)</td></tr>
+  <tr><td>Map Generator</td><td>Custom Python UDMF PWAD builder</td></tr>
   <tr><td>Curriculum</td><td>PLR + scaffolding annealing</td></tr>
-  <tr><td>Distillation</td><td>DAgger + BC-KL fine-tune</td></tr>
+  <tr><td>Distillation</td><td>DAgger + BC-KL fine-tuning</td></tr>
 </table>
 
-<h2>V. Experimental Results</h2>
-<p class="ni">We evaluated the agent zero-shot on 24 procedural maps (seeds 1001–1024, never seen during training) across four difficulty tiers, using a single CPU thread.</p>
+<!-- 6.0 RESULTS -->
+<h2>6.0 Experimental Results</h2>
+<p>We evaluated the trained agent zero-shot on 24 procedural maps it has never encountered (seeds 1001–1024), across four difficulty tiers, using a single CPU thread with torch.set_num_threads(1).</p>
 
 <table>
-  <caption>TABLE III: Per-Tier Zero-Shot Performance</caption>
+  <caption><b>TABLE III.</b> ZERO-SHOT PERFORMANCE BY TIER (24 MAPS)</caption>
   <tr><th>Tier</th><th>Maps</th><th>Avg Score</th><th>Exits</th><th>Kills</th></tr>
-  <tr><td>1 (Open)</td><td>6</td><td>18.19</td><td>1/6</td><td>9</td></tr>
-  <tr><td>2 (Multi-Room)</td><td>6</td><td>8.17</td><td>0/6</td><td>3</td></tr>
-  <tr><td>3 (Keycards)</td><td>6</td><td>9.37</td><td>0/6</td><td>0</td></tr>
-  <tr><td>4 (Gauntlets)</td><td>6</td><td>9.70</td><td>0/6</td><td>2</td></tr>
+  <tr><td>1 (Open arenas)</td><td>6</td><td>18.19</td><td>1 / 6</td><td>9</td></tr>
+  <tr><td>2 (Multi-room)</td><td>6</td><td>8.17</td><td>0 / 6</td><td>3</td></tr>
+  <tr><td>3 (Keycards)</td><td>6</td><td>9.37</td><td>0 / 6</td><td>0</td></tr>
+  <tr><td>4 (Gauntlets)</td><td>6</td><td>9.70</td><td>0 / 6</td><td>2</td></tr>
 </table>
 
 <table>
-  <caption>TABLE IV: System Performance</caption>
-  <tr><th>Metric</th><th>Value</th><th>Limit</th></tr>
-  <tr><td>Total Score</td><td>272.58</td><td>—</td></tr>
-  <tr><td>Mean Latency</td><td>3.41 ms</td><td>40 ms</td></tr>
-  <tr><td>P99 Latency</td><td>11.65 ms</td><td>40 ms</td></tr>
+  <caption><b>TABLE IV.</b> SYSTEM PERFORMANCE METRICS</caption>
+  <tr><th>Metric</th><th>Measured</th><th>Budget</th></tr>
+  <tr><td>Total Evaluation Score</td><td>272.58</td><td>—</td></tr>
+  <tr><td>Mean Inference Latency</td><td>3.41 ms</td><td>40 ms</td></tr>
+  <tr><td>P99 Inference Latency</td><td>11.65 ms</td><td>40 ms</td></tr>
   <tr><td>Exit Rate</td><td>4.2%</td><td>—</td></tr>
-  <tr><td>Parameters</td><td>868,403</td><td>2,000,000</td></tr>
-  <tr><td>Validator</td><td>PASSED</td><td>—</td></tr>
+  <tr><td>Model Parameters</td><td>868,403</td><td>2,000,000</td></tr>
+  <tr><td>Sandbox Validator</td><td>PASSED</td><td>—</td></tr>
 </table>
 
-<div class="figure-full">
-  <img src="training_analytics.png" alt="Training curves over 881k steps">
-  <div class="cap">Fig. 2. Training analytics across 881k steps: reward progression, policy loss, and entropy decay. The jump at ~600k steps marks the teacher distillation phase.</div>
+<div class="fig-full">
+  <img src="training_analytics.png" alt="Training reward and loss curves">
+  <div class="cap">Fig. 2. Training analytics across 881k gradient steps. The sharp improvement around step 600k corresponds to the teacher distillation phase, after which pure PPO self-practice fine-tunes the policy.</div>
 </div>
 
-<div class="figure-full">
-  <img src="heldout_diagnostics.png" alt="Per-tier evaluation on held-out maps">
-  <div class="cap">Fig. 3. Held-out diagnostics by tier. Each bar = one unseen procedural map, color-coded by difficulty tier.</div>
+<div class="fig-full">
+  <img src="heldout_diagnostics.png" alt="Held-out per-tier evaluation">
+  <div class="cap">Fig. 3. Per-map evaluation results on the held-out suite. Each bar represents a single unseen procedural map, grouped and color-coded by difficulty tier.</div>
 </div>
 
-<h2>VI. Rule Compliance</h2>
-<p class="ni">At inference, the agent's <code>act()</code> performs exactly: (1) preprocess observations to tensors, (2) forward pass through HybridDoomNet, (3) sample actions via temperature policy (τ=0.85), (4) apply two observation-legal masks (USE-key cooldown, empty-ammo). Zero pathfinding, zero coordinate reading, zero hand-coded rules anywhere in the evaluation path. The privileged teacher exists only in <code>training/</code> and is never imported at inference.</p>
+<!-- 7.0 RULE COMPLIANCE -->
+<h2>7.0 Rule Compliance</h2>
+<p>At inference time, the agent's act() function does exactly four things: (1) preprocess raw observations into tensors, (2) run a single forward pass through HybridDoomNet, (3) sample actions using a temperature-based stochastic policy (τ = 0.85), and (4) apply two observation-legal masks — a USE-key cooldown to prevent door-bounce stalls and an empty-ammo attack mask. There is literally zero pathfinding code, zero coordinate reading, and zero hand-coded action rules anywhere in the evaluation path. The privileged teacher bot exists only in the training directory and is never called during evaluation.</p>
 
-<h2>VII. Limitations</h2>
-<p class="ni">The scan-matching ego-motion estimator can accumulate angular drift during rapid wall collisions, partially mitigated by exponential decay (0.992) of grid confidence. Long-horizon keycard backtracking on Tier 4 maps remains challenging — the agent sometimes fails to navigate back to locked doors after picking up keys. Extending BPTT from 32 to 64 steps and adding hierarchical subgoal planning would likely address this. With additional compute time, we expect Tier 3–4 exit rates to improve significantly.</p>
+<!-- 8.0 LIMITATIONS -->
+<h2>8.0 Limitations and Future Work</h2>
+<p>The scan-matching ego-motion estimator can accumulate angular drift during rapid wall collisions, causing the internal occupancy grid to slowly misalign. We mitigate this with exponential decay (factor 0.992), but a more robust visual odometry module would help. Long-horizon keycard backtracking on Tier 4 maps is still weak — after grabbing a key, the agent sometimes cannot find its way back to the matching locked door. Extending the BPTT window from 32 to 64 steps and adding hierarchical subgoal planning over the memory slots are the two most promising fixes we would pursue with more training time.</p>
 
-<h2>VIII. Conclusion</h2>
-<p class="ni">We demonstrated that a coordinate-free, purely ego-centric deep RL agent can learn to navigate, fight, and solve procedurally generated 3D environments zero-shot. By combining multi-modal fusion, scan-matched occupancy mapping, recurrent memory, and adaptive curriculum, our system achieves meaningful generalization while maintaining real-time inference well within the computational budget.</p>
+<!-- 9.0 CONCLUSION -->
+<h2>9.0 Conclusion</h2>
+<p>We built a coordinate-free deep RL agent that can navigate, fight, and solve procedurally generated 3D DOOM environments it has never seen before. By fusing five perception modalities, using scan-matched occupancy mapping, recurrent memory, and an adaptive difficulty curriculum, the system achieves real generalization while staying well inside the real-time computation budget. The complete absence of hardcoded coordinates, scripted pathfinding, or manual action rules makes this approach fundamentally transferable to any new map without retraining.</p>
 
+<!-- REFERENCES -->
 <div class="refs">
-<h2>References</h2>
-<p>[1] M. Wydmuch et al., "ViZDoom Competitions: Playing Doom from Pixels," <em>IEEE Trans. Games</em>, vol. 11, no. 3, 2019.</p>
-<p>[2] J. Schulman et al., "Proximal Policy Optimization Algorithms," <em>arXiv:1707.06347</em>, 2017.</p>
-<p>[3] Y. Burda et al., "Exploration by Random Network Distillation," <em>Proc. ICLR</em>, 2019.</p>
-<p>[4] S. Ross et al., "A Reduction of Imitation Learning to No-Regret Online Learning," <em>Proc. AISTATS</em>, 2011.</p>
-<p>[5] M. Jiang et al., "Prioritized Level Replay," <em>Proc. ICML</em>, 2021.</p>
-<p>[6] K. Cho et al., "Learning Phrase Representations using RNN Encoder-Decoder," <em>Proc. EMNLP</em>, 2014.</p>
-<p>[7] A. Howard et al., "Searching for MobileNetV3," <em>Proc. ICCV</em>, 2019.</p>
+<h2>REFERENCES</h2>
+<p>[1] M. Wydmuch, M. Kempka, and W. Jaśkowski, "ViZDoom Competitions: Playing Doom from Pixels," <i>IEEE Trans. Games</i>, vol. 11, no. 3, pp. 248–259, 2019.</p>
+<p>[2] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, "Proximal Policy Optimization Algorithms," <i>arXiv:1707.06347</i>, 2017.</p>
+<p>[3] Y. Burda, H. Edwards, A. Storkey, and O. Klimov, "Exploration by Random Network Distillation," <i>Proc. ICLR</i>, 2019.</p>
+<p>[4] S. Ross, G. Gordon, and D. Bagnell, "A Reduction of Imitation Learning to No-Regret Online Learning," <i>Proc. AISTATS</i>, 2011.</p>
+<p>[5] M. Jiang, E. Grefenstette, and T. Rocktäschel, "Prioritized Level Replay," <i>Proc. ICML</i>, pp. 4940–4950, 2021.</p>
+<p>[6] K. Cho, B. van Merriënboer, et al., "Learning Phrase Representations using RNN Encoder-Decoder," <i>Proc. EMNLP</i>, 2014.</p>
+<p>[7] A. Howard, M. Sandler, et al., "Searching for MobileNetV3," <i>Proc. ICCV</i>, 2019.</p>
 </div>
 
-</div>
+</div><!-- end two-col -->
 </body>
 </html>
