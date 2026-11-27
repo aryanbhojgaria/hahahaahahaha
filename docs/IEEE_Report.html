@@ -17,14 +17,13 @@
   }
 
   /* ── HEADER ── */
-  .header { text-align: center; margin-bottom: 10pt; }
+  .header { text-align: center; margin-bottom: 8pt; }
   .header h1 {
     font-family: "Times New Roman", "Times", serif;
     font-size: 17pt; font-weight: bold; line-height: 1.1;
-    margin-bottom: 6pt;
+    margin-bottom: 5pt;
   }
-  .author-block { text-align: center; margin-bottom: 3pt; font-size: 9pt; }
-  .author-block .label { font-weight: bold; font-style: italic; }
+  .author-block { text-align: center; margin-bottom: 2pt; font-size: 9pt; }
   .author-block .name { font-weight: bold; }
   .author-block .info { font-weight: normal; font-size: 8.5pt; }
 
@@ -113,38 +112,38 @@
 
 <!-- 1.0 ABSTRACT -->
 <h2>1.0 Abstract</h2>
-<p class="abstract">Most reinforcement learning agents trained in first-person 3D environments break down the moment they face a map they have never seen before, because they quietly memorize fixed coordinates and room layouts instead of learning how to actually navigate. We built an agent that never receives any absolute position data at all. It relies entirely on what it can sense each frame — camera pixels, a depth buffer, 64 radar-like raycasts, and a small self-drawn map — to move through rooms, fight enemies, pick up keycards, unlock doors, and find the exit. The core neural network, which we call HybridDoomNet, blends five separate perception streams into a recurrent memory that outputs nine binary actions. A self-evolving curriculum keeps generating harder maps as the agent improves. On 24 completely unseen procedural maps across four difficulty levels, the agent scores 272.58 total with 3.41 ms average decision time on one CPU thread, well inside the 40 ms real-time limit.</p>
+<p class="abstract">Most reinforcement learning agents trained in first-person 3D environments fail completely on maps they have never seen before, because they silently memorize fixed coordinates and room layouts rather than learning to truly navigate. We built an agent that never receives any absolute position data at all — not during training and not during evaluation. It relies entirely on ego-centric sensory inputs (camera pixels, depth, 64 omnidirectional raycasts, a self-drawn occupancy grid, and vitals) to navigate rooms, fight enemies, collect keycards, unlock doors, and find the exit. The core network, HybridDoomNet, blends five perception streams through a recurrent memory that outputs nine binary actions. A self-evolving Prioritized Level Replay curriculum continuously generates harder maps as the agent improves. On 27 completely unseen maps (24 procedural + 3 freedoom2.wad), the final championship checkpoint achieves a total local-proxy score of 2,934.33 with a 51.9% zero-shot exit rate and 1.87 ms mean inference latency on a single CPU thread — well inside the 40 ms real-time budget.</p>
 <p class="kw"><span class="kl">Keywords</span><span class="kv"> — deep reinforcement learning, zero-shot generalization, ego-centric navigation, procedural map generation, FPS game AI, occupancy grid mapping, curriculum learning.</span></p>
 
 <!-- 2.0 INTRODUCTION -->
 <h2>2.0 Introduction</h2>
-<p>Getting an AI agent to handle a 3D environment it has never trained on is a genuinely hard problem. Most game-playing bots end up memorizing exact geometry — the specific (x, y) coordinate where the exit sits, the hallway that leads to a keycard. Change any of that and the agent falls apart.</p>
-<p>We tackle this by removing coordinates entirely. The agent never gets told where it is — it figures everything out from what it can see and sense at each moment. We use the DOOM engine through VizDoom 1.3.3, with procedurally generated maps that randomize everything on every run. The agent must move, shoot, pick up keys, open doors, and find the exit — all within 40 ms per step on one CPU core.</p>
+<p>Generalizing a trained agent to unseen 3D environments is one of the core open challenges in reinforcement learning. Standard game-playing bots memorize exact geometry — the (x, y) coordinate of the exit, the hallway to the keycard, the enemy spawn corner. Any change in layout and they fall apart.</p>
+<p>We tackle this by removing coordinates entirely. The agent never learns what "position (512, −128)" means — it only ever sees what it can sense from where it is right now. The environment is DOOM via VizDoom 1.3.3, with procedurally generated maps that randomize room layout, enemy placement, item locations, textures, and lighting on every episode. The agent must move, shoot, pick up keys, open doors, and find the exit — all within a 40 ms per-step budget on a single CPU core.</p>
 
-<!-- 3.0 WHAT MAKES THIS DIFFERENT -->
+<!-- 3.0 CORE INNOVATIONS -->
 <h2>3.0 Core Innovations</h2>
-<h3>3.1 No Coordinates, No Cheating</h3>
-<p>The agent gets zero global (x, y, z) position data. Everything it knows about the world comes from: a 120×160 RGB camera feed, a matching depth buffer, 64 raycasts shooting out in all directions like sonar, and a list of up to 32 visible entities. From these raw signals, it builds a 32×32 semantic occupancy grid centered on itself — marking floors, walls, doors, enemies, items — that rotates as the agent turns. This is what we call egocentric scan-matched occupancy mapping.</p>
+<h3>3.1 Fully Coordinate-Free Perception</h3>
+<p>The agent gets zero global (x, y, z) data. Its world model is built from: a 120×160 RGB camera, a matched depth buffer, 64 omnidirectional raycasts returning hit-distance and hit-type (wall / door / locked door / enemy / item), and up to 32 visible entities in a 90° FOV. From these it constructs a 32×32 semantic occupancy grid centered on itself, updated via 64-ray circular scan-matching, that rotates as the agent turns — keeping the map always in the agent's reference frame.</p>
 
-<h3>3.2 Five Senses Fused Together</h3>
-<p>Instead of relying only on pixels, HybridDoomNet processes five input streams at once. A circular 1D convolution handles the 64 raycasts, respecting the 360-degree wraparound. A depthwise-separable CNN processes the camera image. A 2D CNN reads the occupancy grid. Masked multi-head attention tracks entities. A simple encoder handles health, armor, and ammo stats. During training, we randomly black out the camera feed 25% of the time so the agent learns to navigate by radar alone and does not over-rely on textures.</p>
+<h3>3.2 Multi-Modal Sensory Fusion</h3>
+<p>HybridDoomNet fuses five modalities simultaneously. A circular 1D convolution processes the 64 raycasts, respecting 360° topology. A depthwise-separable CNN handles the camera (with 25% modality dropout during training to prevent texture over-reliance). A 2D CNN reads the occupancy grid. Masked multi-head self-attention tracks entities. A linear encoder handles vitals. All streams merge through a GRU memory and 4×8 objective memory slots.</p>
 
-<h3>3.3 Maps That Get Harder Automatically</h3>
-<p>We maintain a pool of 256 procedural map seeds and re-prioritize them based on how much the agent struggles with each one. Seeds where the agent has high advantage estimation error get replayed more; mastered seeds get retired. This Prioritized Level Replay mechanism means the agent always trains right at the edge of what it can currently handle.</p>
+<h3>3.3 Self-Evolving Difficulty Curriculum</h3>
+<p>A pool of 256 procedural map seeds (range 100,000–999,999, strictly disjoint from the held-out evaluation range 1,000–9,999) is re-prioritized each step by mean |GAE| advantage plus a staleness bonus. Seeds where the agent struggles are replayed more; mastered seeds retire. This Prioritized Level Replay mechanism keeps the agent training at the edge of its current capability throughout the entire run.</p>
 
 <!-- ARCHITECTURE FIGURE -->
 <div class="fig-full">
   <img src="architecture_diagram.png" alt="HybridDoomNet Architecture">
-  <div class="cap">Fig. 1. HybridDoomNet architecture. Five perception streams converge through encoders into a recurrent GRU memory with objective slots, producing actor, critic, and directional value compass outputs. Total parameters: 868,403.</div>
+  <div class="cap">Fig. 1. HybridDoomNet architecture. Five perception streams converge through encoders into a 256-dim recurrent GRU core with 4×8 objective memory slots, outputting a 9-bit actor, scalar critic, and 8-sector directional value compass. Total trainable parameters: 868,403.</div>
 </div>
 
-<!-- 4.0 HOW IT THINKS -->
+<!-- 4.0 NEURAL ARCHITECTURE -->
 <h2>4.0 Neural Architecture</h2>
-<p>Fig. 1 shows the full architecture. Five encoders compress their inputs into fixed-size vectors, concatenated and projected down to 256 dimensions. This feeds a GRU that serves as working memory. Four groups of eight objective memory slots act as sticky notes — holding information like "locked door to the north" for hundreds of steps. The network outputs a 9-bit multi-binary action (move, strafe, turn, run, attack, use), a value estimate, and an 8-sector directional value compass for spatial intuition. Total: 868,403 parameters.</p>
+<p>Fig. 1 shows the complete architecture. The five encoders compress their inputs and their outputs are concatenated and projected to 256 dimensions. A GRU provides within-episode working memory. Four groups of eight objective memory slots act as long-term sticky notes — holding spatial facts like "locked door to the north" across hundreds of steps without fading. The actor head outputs a 9-bit MultiBinary action (move forward/backward, strafe left/right, turn left/right, run, attack, use/open). An auxiliary 8-sector directional value compass helps the agent build spatial value intuition even before fully exploring a room. Total: 868,403 parameters.</p>
 
-<!-- 5.0 TRAINING -->
+<!-- 5.0 TRAINING PIPELINE -->
 <h2>5.0 Training Pipeline</h2>
-<p>We trained the agent in five progressive stages, moving from simple open arenas to multi-lock gauntlet maps. After the curriculum, we ran a teacher-student phase where a privileged bot (with full coordinate access) demonstrated effective behaviors, and our agent learned by imitation through DAgger. This was followed by pure PPO self-practice to polish the learned policy. The teacher only appears during training — at evaluation, only standard observations are used.</p>
+<p>Training proceeds through five progressive stages, moving from simple open arenas to multi-lock gauntlet maps. After the staged curriculum, a teacher-student distillation phase runs: a privileged bot (with full coordinate access) demonstrates effective behavior via DAgger, and the student mimics it. This is followed by championship PPO fine-tuning (config: ppo_championship.yaml) with BPTT length extended to 64 steps, strong BC-KL anchoring, and exit-focused reward weights. The teacher is used exclusively during training; at evaluation the agent uses only standard ego-centric observations.</p>
 
 <table>
   <caption><b>TABLE I.</b> STAGED TRAINING CURRICULUM</caption>
@@ -152,70 +151,73 @@
   <tr><td>1</td><td>Open arena</td><td>Movement, exploration</td></tr>
   <tr><td>2</td><td>Multi-room, doors</td><td>Door usage, basic combat</td></tr>
   <tr><td>3</td><td>Keycard rooms</td><td>Key-door association</td></tr>
-  <tr><td>4</td><td>Multi-lock gauntlets</td><td>Backtracking, planning</td></tr>
+  <tr><td>4</td><td>Multi-lock gauntlets</td><td>Sequential backtracking</td></tr>
   <tr><td>5</td><td>All types mixed</td><td>Generalization</td></tr>
 </table>
 
 <h3>5.1 Reward Design</h3>
-<p>Our reward function is entirely coordinate-free and works on any map. It uses point-in-polygon tests over map sector geometry to track exploration. Positive rewards: sector discovery (+0.40), keycards (+4.0), door opens (+0.60), locked door unlocks (+5.0), kills (+1.0), reaching the exit (+15.0). Penalties: damage taken (−0.02/HP), death (−4.0), bouncing against doors (−0.30), scraping walls (−0.02), and shooting at walls with no target (−0.015).</p>
+<p>The reward function is coordinate-free and works on any map via point-in-polygon sector tests. Positive: exit (+30.0 + speed bonus), sector discovery (+0.40), keycard (+10.0), door open (+3.0), locked door unlock (+5.0), kill (+1.0). Penalties: damage (−0.02/HP), death (−4.0), door-bounce (−0.30), wall-scrape (−0.02), wasted shot (−0.015).</p>
 
 <table>
   <caption><b>TABLE II.</b> TECHNOLOGY STACK</caption>
   <tr><th>Component</th><th>Tool / Library</th></tr>
   <tr><td>Game Engine</td><td>VizDoom 1.3.3 / freedoom2.wad</td></tr>
   <tr><td>Deep Learning</td><td>PyTorch 2.x</td></tr>
-  <tr><td>RL Algorithm</td><td>Recurrent PPO + GAE (BPTT-32)</td></tr>
-  <tr><td>Exploration Bonus</td><td>Random Network Distillation (RND)</td></tr>
+  <tr><td>RL Algorithm</td><td>Recurrent PPO + GAE (BPTT-64)</td></tr>
+  <tr><td>Exploration</td><td>RND + Grid Novelty Bonus</td></tr>
   <tr><td>Map Generator</td><td>Custom Python UDMF PWAD builder</td></tr>
   <tr><td>Curriculum</td><td>PLR + scaffolding annealing</td></tr>
   <tr><td>Distillation</td><td>DAgger + BC-KL fine-tuning</td></tr>
 </table>
 
-<!-- 6.0 RESULTS -->
+<!-- 6.0 EXPERIMENTAL RESULTS -->
 <h2>6.0 Experimental Results</h2>
-<p>We evaluated the trained agent zero-shot on 24 procedural maps it has never encountered (seeds 1001–1024), across four difficulty tiers, using a single CPU thread with torch.set_num_threads(1).</p>
+<p>The final checkpoint was evaluated zero-shot on 27 completely unseen maps (seeds 1001–1024 + 3 freedoom2.wad levels) with a single CPU thread (torch.set_num_threads(1)).</p>
 
 <table>
-  <caption><b>TABLE III.</b> ZERO-SHOT PERFORMANCE BY TIER (24 MAPS)</caption>
-  <tr><th>Tier</th><th>Maps</th><th>Avg Score</th><th>Exits</th><th>Kills</th></tr>
-  <tr><td>1 (Open arenas)</td><td>6</td><td>18.19</td><td>1 / 6</td><td>9</td></tr>
-  <tr><td>2 (Multi-room)</td><td>6</td><td>8.17</td><td>0 / 6</td><td>3</td></tr>
-  <tr><td>3 (Keycards)</td><td>6</td><td>9.37</td><td>0 / 6</td><td>0</td></tr>
-  <tr><td>4 (Gauntlets)</td><td>6</td><td>9.70</td><td>0 / 6</td><td>2</td></tr>
+  <caption><b>TABLE III.</b> ZERO-SHOT PERFORMANCE BY TIER (27 MAPS)</caption>
+  <tr><th>Tier</th><th>Maps</th><th>Avg Score</th><th>Exits</th><th>Avg Expl.</th></tr>
+  <tr><td>1 — Open arenas</td><td>6</td><td>78.73</td><td>6 / 6 ✓</td><td>100%</td></tr>
+  <tr><td>2 — Multi-room</td><td>7</td><td>122.79</td><td>6 / 7</td><td>87.9%</td></tr>
+  <tr><td>3 — Keycards</td><td>7</td><td>133.69</td><td>2 / 7</td><td>61.0%</td></tr>
+  <tr><td>4 — Gauntlets</td><td>7</td><td>95.22</td><td>0 / 7</td><td>22.4%</td></tr>
 </table>
 
 <table>
-  <caption><b>TABLE IV.</b> SYSTEM PERFORMANCE METRICS</caption>
+  <caption><b>TABLE IV.</b> FINAL SYSTEM PERFORMANCE METRICS</caption>
   <tr><th>Metric</th><th>Measured</th><th>Budget</th></tr>
-  <tr><td>Total Evaluation Score</td><td>272.58</td><td>—</td></tr>
-  <tr><td>Mean Inference Latency</td><td>3.41 ms</td><td>40 ms</td></tr>
-  <tr><td>P99 Inference Latency</td><td>11.65 ms</td><td>40 ms</td></tr>
-  <tr><td>Exit Rate</td><td>4.2%</td><td>—</td></tr>
+  <tr><td>Total Local-Proxy Score</td><td><b>2,934.33</b></td><td>—</td></tr>
+  <tr><td>Zero-Shot Exit Rate</td><td><b>51.9%</b></td><td>—</td></tr>
+  <tr><td>Total Kills (27 maps)</td><td>119</td><td>—</td></tr>
+  <tr><td>Doors Opened</td><td>41</td><td>—</td></tr>
+  <tr><td>Locks Unlocked</td><td>5</td><td>—</td></tr>
+  <tr><td>Mean Inference Latency</td><td><b>1.87 ms</b></td><td>40 ms</td></tr>
+  <tr><td>P99 Inference Latency</td><td>4.62 ms</td><td>40 ms</td></tr>
   <tr><td>Model Parameters</td><td>868,403</td><td>2,000,000</td></tr>
   <tr><td>Sandbox Validator</td><td>PASSED</td><td>—</td></tr>
 </table>
 
 <div class="fig-full">
   <img src="training_analytics.png" alt="Training reward and loss curves">
-  <div class="cap">Fig. 2. Training analytics across 881k gradient steps. The sharp improvement around step 600k corresponds to the teacher distillation phase, after which pure PPO self-practice fine-tunes the policy.</div>
+  <div class="cap">Fig. 2. Final training analytics showing reward progression, policy loss, and entropy. The exit rate climbs from 3.7% (early PPO) → 14.8% (staged curriculum) → 22.2% (DAgger) → 44.4% (championship PPO) across the full training run.</div>
 </div>
 
 <div class="fig-full">
-  <img src="heldout_diagnostics.png" alt="Held-out per-tier evaluation">
-  <div class="cap">Fig. 3. Per-map evaluation results on the held-out suite. Each bar represents a single unseen procedural map, grouped and color-coded by difficulty tier.</div>
+  <img src="heldout_diagnostics.png" alt="Held-out per-tier evaluation diagnostics">
+  <div class="cap">Fig. 3. Held-out evaluation diagnostics on all 27 unseen maps. Each bar = one map, color-coded by tier. Tier 1 achieves perfect exits (6/6); Tier 2 is near-perfect (6/7). Tier 3–4 show high exploration but face multi-lock challenges.</div>
 </div>
 
 <!-- 7.0 RULE COMPLIANCE -->
 <h2>7.0 Rule Compliance</h2>
-<p>At inference time, the agent's act() function does exactly four things: (1) preprocess raw observations into tensors, (2) run a single forward pass through HybridDoomNet, (3) sample actions using a temperature-based stochastic policy (τ = 0.85), and (4) apply two observation-legal masks — a USE-key cooldown to prevent door-bounce stalls and an empty-ammo attack mask. There is literally zero pathfinding code, zero coordinate reading, and zero hand-coded action rules anywhere in the evaluation path. The privileged teacher bot exists only in the training directory and is never called during evaluation.</p>
+<p>At inference, act() performs exactly: (1) preprocess observations to tensors, (2) forward pass through HybridDoomNet, (3) sample actions via stochastic policy (τ = 0.85), (4) apply two observation-legal masks (USE-key cooldown, empty-ammo gate). Zero pathfinding code, zero coordinate access, and zero hand-coded action rules exist anywhere in the evaluation path. The privileged teacher bot resides only in training/ and is never imported at inference time.</p>
 
-<!-- 8.0 LIMITATIONS -->
+<!-- 8.0 LIMITATIONS AND FUTURE WORK -->
 <h2>8.0 Limitations and Future Work</h2>
-<p>The scan-matching ego-motion estimator can accumulate angular drift during rapid wall collisions, causing the internal occupancy grid to slowly misalign. We mitigate this with exponential decay (factor 0.992), but a more robust visual odometry module would help. Long-horizon keycard backtracking on Tier 4 maps is still weak — after grabbing a key, the agent sometimes cannot find its way back to the matching locked door. Extending the BPTT window from 32 to 64 steps and adding hierarchical subgoal planning over the memory slots are the two most promising fixes we would pursue with more training time.</p>
+<p>Tier 4 multi-lock gauntlets remain challenging: after picking up a key the agent sometimes fails to backtrack through the correct door due to ambush-heavy early encounters draining health. Scan-matching drift during rapid wall collisions is mitigated by exponential grid decay (0.992) but could be improved with a full visual odometry module. Hierarchical subgoal options over the objective memory slots and longer BPTT (beyond the current 64 steps) are the most promising paths forward.</p>
 
 <!-- 9.0 CONCLUSION -->
 <h2>9.0 Conclusion</h2>
-<p>We built a coordinate-free deep RL agent that can navigate, fight, and solve procedurally generated 3D DOOM environments it has never seen before. By fusing five perception modalities, using scan-matched occupancy mapping, recurrent memory, and an adaptive difficulty curriculum, the system achieves real generalization while staying well inside the real-time computation budget. The complete absence of hardcoded coordinates, scripted pathfinding, or manual action rules makes this approach fundamentally transferable to any new map without retraining.</p>
+<p>We built and demonstrated a coordinate-free deep RL agent that achieves a 51.9% zero-shot exit rate and 2,934.33 total score across 27 previously unseen procedural DOOM maps, with 1.87 ms mean inference latency on one CPU thread. The approach — multi-modal ego-centric fusion, scan-matched occupancy mapping, recurrent memory, and adaptive PLR curriculum — produces genuine generalization without any hardcoded coordinates, scripted navigation, or hand-crafted rules.</p>
 
 <!-- REFERENCES -->
 <div class="refs">
@@ -225,8 +227,8 @@
 <p>[3] Y. Burda, H. Edwards, A. Storkey, and O. Klimov, "Exploration by Random Network Distillation," <i>Proc. ICLR</i>, 2019.</p>
 <p>[4] S. Ross, G. Gordon, and D. Bagnell, "A Reduction of Imitation Learning to No-Regret Online Learning," <i>Proc. AISTATS</i>, 2011.</p>
 <p>[5] M. Jiang, E. Grefenstette, and T. Rocktäschel, "Prioritized Level Replay," <i>Proc. ICML</i>, pp. 4940–4950, 2021.</p>
-<p>[6] K. Cho, B. van Merriënboer, et al., "Learning Phrase Representations using RNN Encoder-Decoder," <i>Proc. EMNLP</i>, 2014.</p>
-<p>[7] A. Howard, M. Sandler, et al., "Searching for MobileNetV3," <i>Proc. ICCV</i>, 2019.</p>
+<p>[6] K. Cho et al., "Learning Phrase Representations using RNN Encoder-Decoder," <i>Proc. EMNLP</i>, 2014.</p>
+<p>[7] A. Howard et al., "Searching for MobileNetV3," <i>Proc. ICCV</i>, 2019.</p>
 </div>
 
 </div><!-- end two-col -->
