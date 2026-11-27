@@ -43,11 +43,12 @@ Training an embodied agent to generalize to **completely unseen 3D maps** requir
 
 Evaluated zero-shot on [training/scorer/eval_suite.json](training/scorer/eval_suite.json) (`24` disjoint procedural WADs across Tiers 1–4 + `3` `freedoom2.wad` maps) under a **1 CPU thread** (`torch.set_num_threads(1)`), **≤ 2 GB VRAM**, **≤ 8 GB RAM**, and **≤ 40 ms/step** budget:
 
-| Metric | Value (`best_agent.pt`, 881k steps) |
+| Metric | Value (`best_agent.pt`, 2.59M steps) |
 | :--- | :--- |
-| **Held-Out Total Score** | **3,122.37** *(Tier 1–4 avg: `51.7 / 90.2 / 114.7 / 196.9`)* |
-| **Zero-Shot Exit Rate** | **22.2%** |
-| **Single-Thread Inference Latency** | **3.02 ms** mean / **13.03 ms** p99 *(limit: `40.0 ms`)* |
+| **Validation Local Proxy Score** | **2,934.33** *(Tier 1–4 avg: `78.7 / 122.8 / 133.7 / 95.2`)* |
+| **Zero-Shot Exit Rate** | **51.9%** (`14/27`: Tier 1 `6/6`, Tier 2 `6/7`, Tier 3 `2/7`, Tier 4 `0/7`) |
+| **Diagnostics (27 maps)** | `119` kills, `6` keys, `5` locks unlocked, `41` doors opened |
+| **Single-Thread Inference Latency** | **1.87 ms** mean / **4.62 ms** p99 *(limit: `40.0 ms`)* |
 | **Contract & Sandbox Validator** | **PASSED** (`validate.py`) |
 
 ![Training & Held-Out Analytics](docs/training_analytics.png)
