@@ -198,13 +198,8 @@
 </table>
 
 <div class="fig-full">
-  <img src="training_analytics.png" alt="Training reward and loss curves">
-  <div class="cap">Fig. 2. Final training analytics showing reward progression, policy loss, and entropy. The exit rate climbs from 3.7% (early PPO) → 14.8% (staged curriculum) → 22.2% (DAgger) → 44.4% (championship PPO) across the full training run.</div>
-</div>
-
-<div class="fig-full">
-  <img src="heldout_diagnostics.png" alt="Held-out per-tier evaluation diagnostics">
-  <div class="cap">Fig. 3. Held-out evaluation diagnostics on all 27 unseen maps. Each bar = one map, color-coded by tier. Tier 1 achieves perfect exits (6/6); Tier 2 is near-perfect (6/7). Tier 3–4 show high exploration but face multi-lock challenges.</div>
+  <img src="results_dashboard.jpg" alt="Training and validation results dashboard" style="max-height:2.1in;">
+  <div class="cap">Fig. 2. Complete training and validation results dashboard. <em>Top-left:</em> Rolling exit rate (%) vs. environment steps — both DAgger-PPO (blue) and championship fine-tune (green) phases shown. <em>Top-right:</em> Training return and kills per episode across 4 M+ steps. <em>Bottom-left:</em> Per-tier held-out performance on all 27 maps (exit rate + map exploration). <em>Bottom-right:</em> Local proxy score progression across training stages, peaking at 3,117 (DAgger+PPO Best) and stabilising at <strong>2,934.33</strong> (championship submission). Final: Score 2,934.33 | Exit 51.9% (14/27) | Kills 119 | Latency 1.87 ms (p99 4.62 ms) | 247/247 tests PASSED.</div>
 </div>
 
 <!-- 7.0 RULE COMPLIANCE -->
